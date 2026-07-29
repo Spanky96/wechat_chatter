@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/md5"
 	"encoding/base64"
@@ -646,18 +647,46 @@ func MonitorProcess(pid int) {
 }
 
 func cleanAndReattach() {
-	if fridaScript != nil {
-		fridaScript.Clean()
-		Info("Frida 脚本资源已清理")
+	reattachMu.Lock()
+	defer reattachMu.Unlock()
+	if shuttingDown.Load() {
+		return
 	}
-	if session != nil {
-		session.Clean()
-		Info("Frida 会话资源已清理")
-	}
+
+	detachFrida()
 
 	Info("等待微信重新启动...")
 	// 重新等待微信进程并 attach
-	attachWechat()
+	if !shuttingDown.Load() {
+		attachWechat()
+	}
+}
+
+// detachFrida 撤销目标进程内的 Hook，但不调用 frida-go 的 Clean。
+// Clean 在 Frida 17.8 + frida-go 1.0.2 下可能对 GObject 重复 unref。
+func detachFrida() {
+	fridaLifecycleMu.Lock()
+	defer fridaLifecycleMu.Unlock()
+
+	if fridaScript != nil {
+		if !fridaScript.IsDestroyed() {
+			if err := fridaScript.Unload(); err != nil {
+				Warn("卸载 Frida 脚本失败", "err", err)
+			}
+		}
+		fridaScript = nil
+	}
+	if session != nil {
+		if !session.IsDetached() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			if err := session.DetachWithContext(ctx); err != nil {
+				Warn("分离 Frida 会话失败", "err", err)
+			}
+			cancel()
+		}
+		session = nil
+	}
+	Info("Frida Hook 已卸载")
 }
 
 // HexDump formats data like:

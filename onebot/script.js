@@ -1,64 +1,52 @@
-var targetPath = "/Applications/WeChat.app/Contents/MacOS/WeChat";
-var module = Process.enumerateModules().find(function(m) {
-    return m.path === targetPath;
+var modules = Process.enumerateModules();
+var executableModule = modules.find(function(m) {
+    return m.path === "/Applications/WeChat.app/Contents/MacOS/WeChat";
 });
-if (!module) {
-    throw new Error("[-] Cannot find module: " + targetPath);
-}
-var moduleBase = module.base;
-console.log("[+] WeChat module base: " + moduleBase);
-
-// Enumerate readable ranges within 500MB from module base to search for "req2buf"
-var searchSize = 1000 * 1024 * 1024;
-var searchEnd = moduleBase.add(searchSize);
-var _req2bufSearchAddr = null;
+var hookModule = modules.find(function(m) {
+    return m.path.endsWith("/WeChat.app/Contents/Resources/wechat.dylib");
+});
 var baseAddr = null;
 
-var ranges = Process.enumerateRanges("r--").filter(function(r) {
-    var rangeEnd = r.base.add(r.size);
-    return r.base.compare(searchEnd) < 0 && rangeEnd.compare(moduleBase) > 0;
-});
+if (hookModule) {
+    baseAddr = hookModule.base;
+    console.log("[+] wechat.dylib base: " + baseAddr + " size=" + hookModule.size);
+    initAddresses();
+} else {
+    if (!executableModule) {
+        throw new Error("[-] Cannot find WeChat executable module");
+    }
 
-console.log("[+] Found " + ranges.length + " readable ranges within 1000MB window");
+    // 旧版本兜底：在主模块后的地址空间扫描 wechat.dylib 特征串。
+    var searchEnd = executableModule.base.add(1000 * 1024 * 1024);
+    var matchAddress = null;
+    var ranges = Process.enumerateRanges("r--").filter(function(r) {
+        var rangeEnd = r.base.add(r.size);
+        return r.base.compare(searchEnd) < 0 && rangeEnd.compare(executableModule.base) > 0;
+    });
+    var pending = ranges.length;
+    if (pending === 0) {
+        throw new Error("[-] No readable ranges found near WeChat module");
+    }
 
-var pending = ranges.length;
-if (pending === 0) {
-    throw new Error("[-] No readable ranges found within 1000MB from module base");
-}
-
-ranges.forEach(function(r) {
-    Memory.scan(r.base, r.size, "72 65 71 32 62 75 66", {
-        onMatch: function(address, size) {
-            if (_req2bufSearchAddr === null) {
-                var rangeInfo = Process.findRangeByAddress(address);
-                if (rangeInfo) {
-                    if (rangeInfo.size > 100 * 1024 * 1024) {
-                        _req2bufSearchAddr = address;
-                        console.log("[+] Range size > 100MB, accepted as base address");
-                    }
+    ranges.forEach(function(r) {
+        Memory.scan(r.base, r.size, "72 65 71 32 62 75 66", {
+            onMatch: function(address) {
+                if (matchAddress === null) matchAddress = address;
+            },
+            onError: function() {},
+            onComplete: function() {
+                pending--;
+                if (pending !== 0) return;
+                if (matchAddress === null) {
+                    throw new Error("[-] Cannot locate wechat.dylib base");
                 }
-            }
-        },
-        onError: function(reason) {
-            // skip unreadable sub-pages
-        },
-        onComplete: function() {
-            pending--;
-            if (pending === 0) {
-                if (_req2bufSearchAddr === null) {
-                    throw new Error("[-] Cannot find 'req2buf' keyword in a range > 100MB");
-                }
-
-                var foundRange = Process.findRangeByAddress(_req2bufSearchAddr);
-                baseAddr = foundRange.base;
-                console.log("[+] Base address from range: " + baseAddr);
-                console.log("[+] Range size: " + foundRange.size);
-
+                baseAddr = Process.findRangeByAddress(matchAddress).base;
+                console.log("[fallback] wechat.dylib base from scan: " + baseAddr);
                 initAddresses();
             }
-        }
+        });
     });
-});
+}
 
 function initAddresses() {
     // 文本消息全局变量 (new_text.js approach)
@@ -90,20 +78,33 @@ function initAddresses() {
     voiceMessageCallbackFunc = baseAddr.add(0x0);
 
     setupRetOneStub();  // 必须同步先执行，初始化fakeVtable
-    setImmediate(setupSendTextMessageDynamic);
-    setImmediate(setupSendFileMessageDynamic);
-    setImmediate(setupSendFileUploadMessageDynamic);
-    setImmediate(setupSendAppAttachMessageDynamic);
-    setImmediate(attachBlrX8Hook);
-    setImmediate(AttachSendFunc);
-    setImmediate(attachReq2buf);
-    setImmediate(setupSendImgMessageDynamic);
-    setImmediate(attachUploadMedia);
-    setImmediate(patchCdnOnComplete);
-    setImmediate(attachGetCallbackFromWrapper);
-    setImmediate(setupSendReplyMessageDynamic);
-    setImmediate(setupDownloadFileDynamic);
-    setImmediate(setReceiver);
+    runHookSetup("消息接收", setReceiver);
+    runHookSetup("文本消息内存", setupSendTextMessageDynamic);
+    runHookSetup("文本消息编码", attachBlrX8Hook);
+    runHookSetup("StartTask", AttachSendFunc);
+    runHookSetup("Req2Buf", attachReq2buf);
+    {{if .EnableMediaHooks}}
+    runHookSetup("文件消息内存", setupSendFileMessageDynamic);
+    runHookSetup("文件上传内存", setupSendFileUploadMessageDynamic);
+    runHookSetup("附件消息内存", setupSendAppAttachMessageDynamic);
+    runHookSetup("图片消息内存", setupSendImgMessageDynamic);
+    runHookSetup("媒体上传", attachUploadMedia);
+    runHookSetup("CDN 完成回调", patchCdnOnComplete);
+    runHookSetup("上传回调", attachGetCallbackFromWrapper);
+    runHookSetup("回复消息内存", setupSendReplyMessageDynamic);
+    runHookSetup("文件下载内存", setupDownloadFileDynamic);
+    runHookSetup("媒体下载", attachMediaDownloadHooks);
+    {{else}}
+    console.log("[safe-mode] 媒体上传下载 Hook 已禁用，仅启用消息监听与文本发送");
+    {{end}}
+}
+
+function runHookSetup(name, setup) {
+    try {
+        setup();
+    } catch (error) {
+        console.error("[hook-disabled] " + name + " 初始化失败: " + error);
+    }
 }
 
 // -------------------------基础函数分区-------------------------
@@ -1057,12 +1058,11 @@ function setReceiver() {
 		onEnter: function (args) {
 			// 通过 SP+0x140 读取当前 buf2resp 对应的 taskId
 			var respTaskId = this.context.sp.add(0x140).readS32();
-			const currentPtr = this.context.x20;
-			const x2 = this.context.x0.toInt32();
-            if (!isReadablePointer(currentPtr) || x2 < 4 || x2 > MAX_FRIDA_MESSAGE_BYTES) {
-                console.error("[-] buf2resp: pointer 不可读 或 x2 大小不正确, ptr=" + currentPtr + " x2=" + x2);
-				return;
-            }
+				const currentPtr = this.context.x20;
+				const x2 = this.context.x0.toInt32();
+	            if (!isReadablePointer(currentPtr) || x2 < 4 || x2 > MAX_FRIDA_MESSAGE_BYTES) {
+					return;
+	            }
 
             // 判断是否是我们发送的消息的 ack
             if (pendingBuf2RespTaskId !== 0 && respTaskId === pendingBuf2RespTaskId) {
@@ -1108,7 +1108,10 @@ function setReceiver() {
             })
         },
     });
+	console.log("[+] 消息接收 Hook 已启用");
+}
 
+function attachMediaDownloadHooks() {
     Interceptor.attach(startDownloadMedia, {
         onEnter: function (args) {
             downloadGlobalX0 = this.context.x0;
@@ -1161,6 +1164,7 @@ function setReceiver() {
             sendDownloadChunks(dataPtr, dataLen, fileId, cdnUrl);
         }
     });
+	console.log("[experimental] 媒体下载 Hook 已启用");
 }
 
 

@@ -12,11 +12,14 @@ import (
 
 // 全局变量，保持 Frida 脚本对象
 var (
-	fridaScript *frida.Script
-	session     *frida.Session
-	device      frida.DeviceInt
-	taskId      = int64(0x20000000)
-	myWechatId  = ""
+	fridaScript      *frida.Script
+	session          *frida.Session
+	device           frida.DeviceInt
+	fridaLifecycleMu sync.RWMutex
+	reattachMu       sync.Mutex
+	shuttingDown     atomic.Bool
+	taskId           = int64(0x20000000)
+	myWechatId       = ""
 
 	// 全局共享的header字段，启动时初始化一次，两个protobuf共用
 	globalSessionId   = uint32(rand.Int63n(4000000000) + 100000000)
@@ -130,15 +133,16 @@ type SendRequestData struct {
 }
 
 type Config struct {
-	FridaType       string `json:"frida_type"`
-	SendURL         string `json:"send_url"`
-	ReceiveHost     string `json:"receive_host"`
-	FridaGadgetAddr string `json:"frida_gadget_addr"`
-	OnebotToken     string `json:"onebot_token"`
-	ImagePath       string `json:"image_path"`
-	ConnType        string `json:"conn_type"`
-	SendInterval    int    `json:"send_interval"`
-	WechatPid       int    `json:"wechat_pid"`
+	FridaType        string `json:"frida_type"`
+	SendURL          string `json:"send_url"`
+	ReceiveHost      string `json:"receive_host"`
+	FridaGadgetAddr  string `json:"frida_gadget_addr"`
+	OnebotToken      string `json:"onebot_token"`
+	ImagePath        string `json:"image_path"`
+	ConnType         string `json:"conn_type"`
+	SendInterval     int    `json:"send_interval"`
+	WechatPid        int    `json:"wechat_pid"`
+	EnableMediaHooks bool   `json:"enable_media_hooks"`
 
 	WechatConf string `json:"wechat_conf"`
 }

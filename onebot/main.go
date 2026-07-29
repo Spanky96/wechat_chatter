@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 func main() {
 	initFlag()
 	initLogger()
+	installSignalHandler()
 	if config.FridaType == "gadget" {
 		initFridaGadget()
 	} else {
@@ -35,23 +37,32 @@ func main() {
 	http.HandleFunc("/ws", handleWebSocket)
 	http.HandleFunc("/test_ws", testWebSocket)
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
-
-	go func() {
-		<-stop
-		fridaScript.Clean()
-		session.Clean()
-		device.Clean()
-		Fatal("正在释放 Frida 资源并退出...")
-	}()
-
 	// 3. 启动服务
 	Info("HTTP 服务启动在", "host", config.ReceiveHost)
 	if err := http.ListenAndServe(config.ReceiveHost, nil); err != nil {
 		Error("服务启动失败", "err", err)
 	}
+}
 
+func installSignalHandler() {
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-stop
+		shuttingDown.Store(true)
+		Info("收到退出信号，正在停止 OneBot...")
+		done := make(chan struct{})
+		go func() {
+			detachFrida()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			Warn("Frida 会话卸载超时，直接退出 OneBot")
+		}
+		os.Exit(0)
+	}()
 }
 
 func initFlag() {
@@ -65,6 +76,7 @@ func initFlag() {
 	flag.StringVar(&config.ConnType, "conn_type", "http", "连接类型: http | websocket")
 	flag.IntVar(&config.SendInterval, "send_interval", 1000, "发送间隔: ms")
 	flag.IntVar(&config.WechatPid, "wechat_pid", 0, "微信进程 PID，不设置则自动查找")
+	flag.BoolVar(&config.EnableMediaHooks, "enable_media_hooks", false, "启用媒体上传下载 Hook（实验性，可能降低微信稳定性）")
 	flag.StringVar(&logLevel, "log_level", "info", "log level")
 
 	flag.Parse()
@@ -92,6 +104,7 @@ func initFlag() {
 	fmt.Println("ConnType", config.ConnType)
 	fmt.Println("SendInterval", config.SendInterval)
 	fmt.Println("WechatPid", config.WechatPid)
+	fmt.Println("EnableMediaHooks", config.EnableMediaHooks)
 	fmt.Println("LogLevel", logLevel)
 }
 
@@ -128,26 +141,35 @@ func initFrida() {
 }
 
 func attachWechat() {
-	var pid int
-	var err error
-	if config.WechatPid > 0 {
-		pid = config.WechatPid
-		Info("使用指定的微信进程 PID", "PID", pid)
-	} else {
-		for {
-			pid, err = GetWeChatPID()
-			if err == nil {
-				break
+	pid := config.WechatPid
+	lastPid := 0
+	for !shuttingDown.Load() {
+		if config.WechatPid == 0 {
+			detectedPid, err := GetWeChatPID()
+			if err != nil {
+				Info("未发现正在运行的微信进程，5秒后重试...")
+				time.Sleep(5 * time.Second)
+				continue
 			}
-			Info("未发现正在运行的微信进程，20秒后重试...")
-			time.Sleep(20 * time.Second)
+			pid = detectedPid
 		}
-		Info("自动发现微信进程 PID", "PID", pid)
-	}
+		if pid != lastPid {
+			Info("发现微信进程", "PID", pid)
+			lastPid = pid
+		}
 
-	session, err = device.Attach(pid, nil)
-	if err != nil {
-		Fatal("Attach 失败 (请检查 SIP 状态或权限)", "err", err)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		attachedSession, attachErr := device.AttachWithContext(ctx, pid, nil)
+		cancel()
+		if attachErr == nil {
+			session = attachedSession
+			break
+		}
+		Warn("Attach 失败，5 秒后重试", "PID", pid, "err", attachErr)
+		time.Sleep(5 * time.Second)
+	}
+	if shuttingDown.Load() {
+		return
 	}
 	Info("成功 Attach 微信进程", "PID", pid)
 
@@ -166,6 +188,7 @@ func loadJs() {
 	if err = json.Unmarshal(jsonData, &wechatHookConf); err != nil {
 		Fatal("解析 JSON 失败", "err", err)
 	}
+	wechatHookConf["EnableMediaHooks"] = config.EnableMediaHooks
 
 	codeTemplate, err := os.ReadFile("./script.js")
 	if err != nil {
@@ -198,9 +221,8 @@ func loadJs() {
 		}()
 
 		var msg map[string]interface{}
-		err = json.Unmarshal([]byte(rawMsg), &msg)
-		if err != nil {
-			Error("JSON解析失败", "err", err)
+		if parseErr := json.Unmarshal([]byte(rawMsg), &msg); parseErr != nil {
+			Error("JSON解析失败", "err", parseErr)
 			return
 		}
 
@@ -348,6 +370,8 @@ func loadJs() {
 		Fatal("❌ 加载脚本失败", err)
 	}
 
+	fridaLifecycleMu.Lock()
 	fridaScript = script
+	fridaLifecycleMu.Unlock()
 	Info("✅ Frida 已就绪，微信控制通道已打通")
 }
