@@ -147,9 +147,7 @@ func attachWechat() {
 		if config.WechatPid == 0 {
 			detectedPid, err := GetWeChatPID()
 			if err != nil {
-				Info("未发现正在运行的微信进程，5秒后重试...")
-				time.Sleep(5 * time.Second)
-				continue
+				Fatal("未发现正在运行的微信进程，请先打开微信再启动 OneBot", "err", err)
 			}
 			pid = detectedPid
 		}
@@ -165,8 +163,7 @@ func attachWechat() {
 			session = attachedSession
 			break
 		}
-		Warn("Attach 失败，5 秒后重试", "PID", pid, "err", attachErr)
-		time.Sleep(5 * time.Second)
+		Fatal("Attach 失败，请正常退出并重新打开微信后再启动 OneBot", "PID", pid, "err", attachErr)
 	}
 	if shuttingDown.Load() {
 		return

@@ -16,7 +16,6 @@ var (
 	session          *frida.Session
 	device           frida.DeviceInt
 	fridaLifecycleMu sync.RWMutex
-	reattachMu       sync.Mutex
 	shuttingDown     atomic.Bool
 	taskId           = int64(0x20000000)
 	myWechatId       = ""

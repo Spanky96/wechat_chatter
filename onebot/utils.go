@@ -619,8 +619,8 @@ func DetectAndSaveImage(data []byte) (string, error) {
 	return SaveImageToFile(ext, data)
 }
 
-// MonitorProcess 监控指定 PID 的进程是否退出
-// 如果进程退出，清理 Frida 资源并等待微信重新启动后重新 attach
+// MonitorProcess 监控指定 PID 的进程是否退出。微信退出后 OneBot 同步退出，
+// 避免对新进程自动重复注入；后续由管理员从后台明确启动。
 func MonitorProcess(pid int) {
 	Info("开始监控微信进程", "PID", pid)
 	go func() {
@@ -630,36 +630,22 @@ func MonitorProcess(pid int) {
 		for range ticker.C {
 			proc, err := os.FindProcess(pid)
 			if err != nil {
-				Info("微信进程已退出，清理 Frida 资源，等待微信重新启动...")
-				cleanAndReattach()
+				Info("微信进程已退出，OneBot 将停止")
+				detachFrida()
+				os.Exit(0)
 				return
 			}
 
 			// 检查进程是否存活
 			err = proc.Signal(syscall.Signal(0))
 			if err != nil {
-				Info("微信进程已退出，清理 Frida 资源，等待微信重新启动...")
-				cleanAndReattach()
+				Info("微信进程已退出，OneBot 将停止")
+				detachFrida()
+				os.Exit(0)
 				return
 			}
 		}
 	}()
-}
-
-func cleanAndReattach() {
-	reattachMu.Lock()
-	defer reattachMu.Unlock()
-	if shuttingDown.Load() {
-		return
-	}
-
-	detachFrida()
-
-	Info("等待微信重新启动...")
-	// 重新等待微信进程并 attach
-	if !shuttingDown.Load() {
-		attachWechat()
-	}
 }
 
 // detachFrida 撤销目标进程内的 Hook，但不调用 frida-go 的 Clean。

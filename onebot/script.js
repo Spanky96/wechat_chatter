@@ -78,22 +78,22 @@ function initAddresses() {
     voiceMessageCallbackFunc = baseAddr.add(0x0);
 
     setupRetOneStub();  // 必须同步先执行，初始化fakeVtable
-    runHookSetup("消息接收", setReceiver);
-    runHookSetup("文本消息内存", setupSendTextMessageDynamic);
-    runHookSetup("文本消息编码", attachBlrX8Hook);
-    runHookSetup("StartTask", AttachSendFunc);
-    runHookSetup("Req2Buf", attachReq2buf);
+    scheduleHookSetup("消息接收", setReceiver);
+    scheduleHookSetup("文本消息内存", setupSendTextMessageDynamic);
+    scheduleHookSetup("文本消息编码", attachBlrX8Hook);
+    scheduleHookSetup("StartTask", AttachSendFunc);
+    scheduleHookSetup("Req2Buf", attachReq2buf);
     {{if .EnableMediaHooks}}
-    runHookSetup("文件消息内存", setupSendFileMessageDynamic);
-    runHookSetup("文件上传内存", setupSendFileUploadMessageDynamic);
-    runHookSetup("附件消息内存", setupSendAppAttachMessageDynamic);
-    runHookSetup("图片消息内存", setupSendImgMessageDynamic);
-    runHookSetup("媒体上传", attachUploadMedia);
-    runHookSetup("CDN 完成回调", patchCdnOnComplete);
-    runHookSetup("上传回调", attachGetCallbackFromWrapper);
-    runHookSetup("回复消息内存", setupSendReplyMessageDynamic);
-    runHookSetup("文件下载内存", setupDownloadFileDynamic);
-    runHookSetup("媒体下载", attachMediaDownloadHooks);
+    scheduleHookSetup("文件消息内存", setupSendFileMessageDynamic);
+    scheduleHookSetup("文件上传内存", setupSendFileUploadMessageDynamic);
+    scheduleHookSetup("附件消息内存", setupSendAppAttachMessageDynamic);
+    scheduleHookSetup("图片消息内存", setupSendImgMessageDynamic);
+    scheduleHookSetup("媒体上传", attachUploadMedia);
+    scheduleHookSetup("CDN 完成回调", patchCdnOnComplete);
+    scheduleHookSetup("上传回调", attachGetCallbackFromWrapper);
+    scheduleHookSetup("回复消息内存", setupSendReplyMessageDynamic);
+    scheduleHookSetup("文件下载内存", setupDownloadFileDynamic);
+    scheduleHookSetup("媒体下载", attachMediaDownloadHooks);
     {{else}}
     console.log("[safe-mode] 媒体上传下载 Hook 已禁用，仅启用消息监听与文本发送");
     {{end}}
@@ -103,8 +103,14 @@ function runHookSetup(name, setup) {
     try {
         setup();
     } catch (error) {
-        console.error("[hook-disabled] " + name + " 初始化失败: " + error);
+        console.error("[hook-disabled] " + name + " 初始化失败: " + error + " stack=" + (error.stack || ""));
     }
+}
+
+function scheduleHookSetup(name, setup) {
+    setImmediate(function() {
+        runHookSetup(name, setup);
+    });
 }
 
 // -------------------------基础函数分区-------------------------
@@ -144,6 +150,17 @@ function isReadablePointer(addr) {
         }
         const range = Process.findRangeByAddress(addr);
         return range !== null && range.protection.indexOf('r') !== -1;
+    } catch (e) {
+        return false;
+    }
+}
+
+function isWritablePointer(addr, size) {
+    try {
+        if (!addr || addr.isNull()) return false;
+        const range = Process.findRangeByAddress(addr);
+        if (!range || range.protection.indexOf('w') === -1) return false;
+        return addr.add(size || 1).compare(range.base.add(range.size)) <= 0;
     } catch (e) {
         return false;
     }
@@ -253,6 +270,7 @@ var textProtoDataAddr = ptr(0);
 // 双方公共使用的地址
 var triggerX1Payload;
 var triggerX0;
+var sendCaptureListener = null;
 var req2bufEnterAddr;
 var req2bufExitAddr;
 var sendFuncAddr;
@@ -366,6 +384,9 @@ function setupSendTextMessageDynamic() {
     sendTextMessageAddr = Memory.alloc(256);
     textMessageAddr = Memory.alloc(256);
     textProtoDataAddr = Memory.alloc(64 * 1024); // 支持 50KB 分片(uploadappattach)的 protobuf
+    // X1 是一次发送任务的可变 payload，必须使用长期存活的自有缓冲区。
+    // 复用微信调用栈里的临时 X1 会在稍后发送时变成悬空指针并导致 access violation。
+    triggerX1Payload = Memory.alloc(1024);
 
     // A. 写入字符串内容
     patchString(textCgiAddr, "/cgi-bin/micromsg-bin/newsendmsg");
@@ -384,7 +405,9 @@ function setupSendTextMessageDynamic() {
     textMessageAddr.add(0x0c).writeU32(0x20a);
     textMessageAddr.add(0x10).writeU64(0x3);
     textMessageAddr.add(0x18).writePointer(textCgiAddr);
-    textMessageAddr.add(0x20).writeU64(uint64("0x20"));
+    // Frida 17 在部分 macOS 进程中对 uint64("0x20") 会报 missing argument；
+    // 这里是小整数，直接写入等价且不依赖运行时 uint64 helper。
+    textMessageAddr.add(0x20).writeU64(0x20);
 
     console.log("[+] Dynamic Text Message Setup Complete.");
 }
@@ -564,16 +587,24 @@ function triggerSendTextMessage(taskId, receiver, content, atUser, protoHex, pay
 }
 
 function AttachSendFunc() {
-    Interceptor.attach(sendFuncAddr.add(0x10), {
+    sendCaptureListener = Interceptor.attach(sendFuncAddr.add(0x10), {
         onEnter: function (args) {
-
-            if (triggerX1Payload) {
-                return
+            // X0 是长期存活的 STNManager；X1 使用 setup 中分配的自有缓冲区。
+            // 每次正常 StartTask 都刷新 X0，避免微信内部重建管理器后继续使用旧地址。
+            const currentX0 = this.context.x0;
+            if (!isReadablePointer(currentX0)) {
+                return;
             }
-
-            triggerX0 = this.context.x0;
-            triggerX1Payload = this.context.x1;
-            console.log(`[+] 捕获到 StartTask 调用，X0：${triggerX0}, Payload: ${triggerX1Payload}`);
+            const managerChanged = !triggerX0 || !currentX0.equals(triggerX0);
+            triggerX0 = currentX0;
+            if (managerChanged) {
+                console.log(`[+] 捕获到有效 StartTask 调用，X0：${triggerX0}`);
+            }
+            const listener = sendCaptureListener;
+            sendCaptureListener = null;
+            setImmediate(function() {
+                if (listener) listener.detach();
+            });
         }
     })
 }
@@ -751,6 +782,16 @@ function triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex,
     if (!triggerX0 || !triggerX1Payload) {
         console.error("[!] triggerX0 或 triggerX1Payload 尚未初始化，请等待 hook 捕获");
         return "fail";
+    }
+
+    if (msgType === "text" && (textMessageAddr.isNull() || sendTextMessageAddr.isNull() || textCgiAddr.isNull())) {
+        console.error("[!] 文本消息 Hook 尚未初始化，拒绝发送");
+        return "fail: text hook unavailable";
+    }
+
+    if (!isReadablePointer(triggerX0) || !isWritablePointer(triggerX1Payload, 0x1a0)) {
+        console.error("[!] StartTask 上下文已失效，等待微信产生新的可写任务上下文");
+        return "fail: stale start task context";
     }
 
     var msgAddrInfo = {
