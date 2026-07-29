@@ -95,7 +95,12 @@ function initAddresses() {
     scheduleHookSetup("文件下载内存", setupDownloadFileDynamic);
     scheduleHookSetup("媒体下载", attachMediaDownloadHooks);
     {{else}}
+    {{if .EnableMediaDownloadHooks}}
+    scheduleHookSetup("媒体下载", attachMediaDownloadHooks);
+    console.log("[safe-mode] 仅启用被动媒体下载监听与文本发送");
+    {{else}}
     console.log("[safe-mode] 媒体上传下载 Hook 已禁用，仅启用消息监听与文本发送");
+    {{end}}
     {{end}}
 }
 
@@ -270,7 +275,7 @@ var textProtoDataAddr = ptr(0);
 // 双方公共使用的地址
 var triggerX1Payload;
 var triggerX0;
-var sendCaptureListener = null;
+var triggeringStartTask = false;
 var req2bufEnterAddr;
 var req2bufExitAddr;
 var sendFuncAddr;
@@ -586,9 +591,20 @@ function triggerSendTextMessage(taskId, receiver, content, atUser, protoHex, pay
     return triggerSendMediaMessage(taskId, "", receiver, protoHex, payloadHex, "text");
 }
 
+function getSendContextStatus() {
+    if (!triggerX0 || !triggerX1Payload) return "waiting";
+    return isReadablePointer(triggerX0) && isWritablePointer(triggerX1Payload, 0x1a0)
+        ? "ready"
+        : "stale";
+}
+
 function AttachSendFunc() {
-    sendCaptureListener = Interceptor.attach(sendFuncAddr.add(0x10), {
+    Interceptor.attach(sendFuncAddr.add(0x10), {
         onEnter: function (args) {
+            // 忽略本脚本主动发起的调用，只从微信自身的调用持续刷新 manager。
+            if (triggeringStartTask) {
+                return;
+            }
             // X0 是长期存活的 STNManager；X1 使用 setup 中分配的自有缓冲区。
             // 每次正常 StartTask 都刷新 X0，避免微信内部重建管理器后继续使用旧地址。
             const currentX0 = this.context.x0;
@@ -600,11 +616,6 @@ function AttachSendFunc() {
             if (managerChanged) {
                 console.log(`[+] 捕获到有效 StartTask 调用，X0：${triggerX0}`);
             }
-            const listener = sendCaptureListener;
-            sendCaptureListener = null;
-            setImmediate(function() {
-                if (listener) listener.detach();
-            });
         }
     })
 }
@@ -827,11 +838,14 @@ function triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex,
     const MMStartTask = new NativeFunction(sendFuncAddr, 'int64', ['pointer', 'pointer']);
 
     try {
+        triggeringStartTask = true;
         MMStartTask(triggerX0, triggerX1Payload);
         return "1";
     } catch (e) {
         console.error("[!] Error trigger " + msgType + " MMStartTask: " + e);
         return "fail";
+    } finally {
+        triggeringStartTask = false;
     }
 }
 
@@ -1066,6 +1080,7 @@ function triggerSendVoiceMessage(taskId, sender, receiver, protoHex, payloadHex)
 // -------------------------发送语音消息分区-------------------------
 
 rpc.exports = {
+    getSendContextStatus: getSendContextStatus,
     triggerSendImgMessage: triggerSendImgMessage,
     triggerUploadImg: triggerUploadImg,
     triggerSendTextMessage: triggerSendTextMessage,

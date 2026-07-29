@@ -84,7 +84,7 @@ func SendWechatMsg(m *SendMsg) {
 		Info("📩 发送文本任务执行结果", "result", result, "task_id", currTaskId, "target_id", targetId, "at_user", m.AtUser)
 		if result != "1" {
 			Error("发送文本失败", "task_id", currTaskId, "target_id", targetId, "result", result)
-			sendErr = errors.New("send text failed")
+			sendErr = fmt.Errorf("send text failed: %v", result)
 			return
 		}
 	case "image":
@@ -359,11 +359,13 @@ func HandleMsg(jsonData []byte) ([]byte, error) {
 
 	for _, msg := range m.Message {
 		if !config.EnableMediaHooks {
-			switch msg.Type {
-			case "record", "image", "file", "video", "face":
-				// 稳定监听模式只转发元数据，不触发 CDN 下载和媒体解密。
-				msg.Data.Media = nil
-				continue
+			// 稳定监听模式仅允许图片走被动下载监听，其余媒体仍只转发元数据。
+			if msg.Type != "image" || !config.EnableMediaDownloadHooks {
+				switch msg.Type {
+				case "record", "image", "file", "video", "face":
+					msg.Data.Media = nil
+					continue
+				}
 			}
 		}
 		switch msg.Type {
@@ -383,10 +385,15 @@ func HandleMsg(jsonData []byte) ([]byte, error) {
 				return nil, err
 			}
 
-			path, err := GetDownloadPath(fileMsg.Image.MidImgURL, fileMsg.Image.AesKey, "", 0)
+			attempts := 30
+			if !config.EnableMediaHooks {
+				attempts = 4
+			}
+			path, err := getDownloadPath(fileMsg.Image.MidImgURL, fileMsg.Image.AesKey, "", 0, attempts)
 			if err != nil {
-				Error("获取文件路径失败", "err", err)
-				return nil, err
+				Warn("图片预览下载失败，仅转发消息元数据", "err", err)
+				msg.Data.Media = nil
+				continue
 			}
 
 			msg.Data.URL = "file://" + path
@@ -456,7 +463,11 @@ func HandleMsg(jsonData []byte) ([]byte, error) {
 }
 
 func GetDownloadPath(cdnUrl, aesKeyStr, extHint string, totalLen int) (string, error) {
-	for i := 0; i < 30; i++ {
+	return getDownloadPath(cdnUrl, aesKeyStr, extHint, totalLen, 30)
+}
+
+func getDownloadPath(cdnUrl, aesKeyStr, extHint string, totalLen, attempts int) (string, error) {
+	for i := 0; i < attempts; i++ {
 		if downloadMsgInter, ok := userID2FileMsgMap.Load(cdnUrl); ok {
 			downloadReq := downloadMsgInter.(*DownloadRequest)
 
@@ -473,7 +484,7 @@ func GetDownloadPath(cdnUrl, aesKeyStr, extHint string, totalLen int) (string, e
 			Info("文件等待下载", "url", cdnUrl, "times", i, "last_append_time", timeSinceLastAppend)
 
 			// 如果数据仍在接收中（3秒内有新数据），继续等待
-			if timeSinceLastAppend < 2000 && i < 29 {
+			if timeSinceLastAppend < 2000 && i < attempts-1 {
 				downloadReq.mu.Unlock()
 				time.Sleep(2 * time.Second)
 				continue

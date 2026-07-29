@@ -33,6 +33,7 @@ func main() {
 
 	http.HandleFunc("/send_private_msg", sendHandler)
 	http.HandleFunc("/send_group_msg", sendHandler)
+	http.HandleFunc("/send_status", sendStatusHandler)
 
 	http.HandleFunc("/ws", handleWebSocket)
 	http.HandleFunc("/test_ws", testWebSocket)
@@ -77,6 +78,7 @@ func initFlag() {
 	flag.IntVar(&config.SendInterval, "send_interval", 1000, "发送间隔: ms")
 	flag.IntVar(&config.WechatPid, "wechat_pid", 0, "微信进程 PID，不设置则自动查找")
 	flag.BoolVar(&config.EnableMediaHooks, "enable_media_hooks", false, "启用媒体上传下载 Hook（实验性，可能降低微信稳定性）")
+	flag.BoolVar(&config.EnableMediaDownloadHooks, "enable_media_download_hooks", false, "仅启用被动媒体下载监听")
 	flag.StringVar(&logLevel, "log_level", "info", "log level")
 
 	flag.Parse()
@@ -105,6 +107,7 @@ func initFlag() {
 	fmt.Println("SendInterval", config.SendInterval)
 	fmt.Println("WechatPid", config.WechatPid)
 	fmt.Println("EnableMediaHooks", config.EnableMediaHooks)
+	fmt.Println("EnableMediaDownloadHooks", config.EnableMediaDownloadHooks)
 	fmt.Println("LogLevel", logLevel)
 }
 
@@ -186,6 +189,7 @@ func loadJs() {
 		Fatal("解析 JSON 失败", "err", err)
 	}
 	wechatHookConf["EnableMediaHooks"] = config.EnableMediaHooks
+	wechatHookConf["EnableMediaDownloadHooks"] = config.EnableMediaDownloadHooks
 
 	codeTemplate, err := os.ReadFile("./script.js")
 	if err != nil {

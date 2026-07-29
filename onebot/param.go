@@ -132,16 +132,17 @@ type SendRequestData struct {
 }
 
 type Config struct {
-	FridaType        string `json:"frida_type"`
-	SendURL          string `json:"send_url"`
-	ReceiveHost      string `json:"receive_host"`
-	FridaGadgetAddr  string `json:"frida_gadget_addr"`
-	OnebotToken      string `json:"onebot_token"`
-	ImagePath        string `json:"image_path"`
-	ConnType         string `json:"conn_type"`
-	SendInterval     int    `json:"send_interval"`
-	WechatPid        int    `json:"wechat_pid"`
-	EnableMediaHooks bool   `json:"enable_media_hooks"`
+	FridaType                string `json:"frida_type"`
+	SendURL                  string `json:"send_url"`
+	ReceiveHost              string `json:"receive_host"`
+	FridaGadgetAddr          string `json:"frida_gadget_addr"`
+	OnebotToken              string `json:"onebot_token"`
+	ImagePath                string `json:"image_path"`
+	ConnType                 string `json:"conn_type"`
+	SendInterval             int    `json:"send_interval"`
+	WechatPid                int    `json:"wechat_pid"`
+	EnableMediaHooks         bool   `json:"enable_media_hooks"`
+	EnableMediaDownloadHooks bool   `json:"enable_media_download_hooks"`
 
 	WechatConf string `json:"wechat_conf"`
 }

@@ -186,9 +186,11 @@ func buildWechatMessageJSON(data *wxproto.WxRecvMsgData) ([]byte, error) {
 		groupId = sender
 
 		splitIndex := strings.Index(content, ":")
-		sendUserStart := strings.Index(content, "wxid_")
-		if sendUserStart >= 0 && splitIndex > sendUserStart {
-			senderUser = strings.TrimSpace(content[sendUserStart:splitIndex])
+		if splitIndex > 0 {
+			candidate := strings.TrimSpace(content[:splitIndex])
+			if candidate != "" && !strings.ContainsAny(candidate, "<>\n\r\t ") {
+				senderUser = candidate
+			}
 		}
 
 		atUserMatch := regexp.MustCompile(`<atuserlist>([\s\S]*?)</atuserlist>`).FindStringSubmatch(xmlStr)
@@ -205,9 +207,7 @@ func buildWechatMessageJSON(data *wxproto.WxRecvMsgData) ([]byte, error) {
 		// 处理用户的名称
 		splitIdx := strings.Index(userContent, ":")
 		if splitIdx == -1 {
-			if idx := strings.Index(userContent, "在群聊中@了你"); idx != -1 {
-				senderNickname = strings.TrimSpace(userContent[:idx])
-			} else if idx := strings.Index(userContent, "在群聊中发了一段语"); idx != -1 {
+			if idx := strings.Index(userContent, "在群聊中"); idx != -1 {
 				senderNickname = strings.TrimSpace(userContent[:idx])
 			}
 		} else {
@@ -266,7 +266,7 @@ func getMessagesFromProto(content, sender string, mediaContent []byte) []*Messag
 			if part == "" {
 				continue
 			}
-			messages = append(messages, classifyMessage(part, nil))
+			messages = append(messages, classifyMessage(part, mediaContent))
 		}
 	} else {
 		messages = append(messages, classifyMessage(content, mediaContent))
@@ -280,7 +280,7 @@ func classifyMessage(content string, mediaContent []byte) *Message {
 	content = strings.ReplaceAll(content, "\n", "")
 	switch {
 	case strings.HasPrefix(content, "<?xml version=\"1.0\"?><msg><img"):
-		return &Message{Type: "image", Data: &SendRequestData{Text: content}}
+		return &Message{Type: "image", Data: &SendRequestData{Text: content, Media: mediaContent}}
 	case strings.HasPrefix(content, "<msg><voicemsg"):
 		if mediaContent != nil {
 			// 找到 silk 音频数据起始位置

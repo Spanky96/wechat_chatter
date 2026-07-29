@@ -15,6 +15,22 @@ import (
 	"time"
 )
 
+func sendStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "仅支持 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	status, _ := callFridaExport("getSendContextStatus").(string)
+	if status == "" {
+		status = "unavailable"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"status": status,
+		"ready":  status == "ready",
+	})
+}
+
 func sendHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "仅支持 POST", http.StatusMethodNotAllowed)
@@ -257,4 +273,3 @@ func extractFileName(s string) string {
 	}
 	return s
 }
-
