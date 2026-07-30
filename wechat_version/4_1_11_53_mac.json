@@ -1,5 +1,6 @@
 {
 	"sendFuncAddr": "0x5120fd8",
+	"sendDirectFuncAddr": "0x5116f30",
 	"req2bufEnterAddr": "0x3e58e8c",
 	"req2bufExitAddr": "0x3E59DE0",
 	"buf2RespAddr": "0x3e7e670",
@@ -18,4 +19,3 @@
 	"downloadFileAddr": "0x535ea98",
 	"downloadVideoAddr": "0x5378a18"
 }
-

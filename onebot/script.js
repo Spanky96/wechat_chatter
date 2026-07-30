@@ -57,6 +57,7 @@ function initAddresses() {
     req2bufEnterAddr = baseAddr.add({{.req2bufEnterAddr}});
     req2bufExitAddr = baseAddr.add({{.req2bufExitAddr}});
     sendFuncAddr = baseAddr.add({{.sendFuncAddr}});
+    sendDirectFuncAddr = {{if .sendDirectFuncAddr}}baseAddr.add({{.sendDirectFuncAddr}}){{else}}ptr(0){{end}};
     buf2RespAddr = baseAddr.add({{.buf2RespAddr}});
 
     uploadImageAddr = baseAddr.add({{.uploadImageAddr}});
@@ -279,6 +280,7 @@ var triggeringStartTask = false;
 var req2bufEnterAddr;
 var req2bufExitAddr;
 var sendFuncAddr;
+var sendDirectFuncAddr = ptr(0);
 var insertMsgAddr = ptr(0);
 var sendMsgType = "";
 var buf2RespAddr;
@@ -592,10 +594,13 @@ function triggerSendTextMessage(taskId, receiver, content, atUser, protoHex, pay
 }
 
 function getSendContextStatus() {
-    if (!triggerX0 || !triggerX1Payload) return "waiting";
-    return isReadablePointer(triggerX0) && isWritablePointer(triggerX1Payload, 0x1a0)
-        ? "ready"
-        : "stale";
+    if (!triggerX1Payload) return "waiting";
+    if (sendDirectFuncAddr && !sendDirectFuncAddr.isNull()) {
+        return "ready";
+    }
+    if (!triggerX0) return "waiting";
+    if (!isReadablePointer(triggerX0)) return "stale-manager";
+    return "ready";
 }
 
 function AttachSendFunc() {
@@ -790,7 +795,8 @@ function triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex,
         return "fail";
     }
 
-    if (!triggerX0 || !triggerX1Payload) {
+    const directSendAvailable = sendDirectFuncAddr && !sendDirectFuncAddr.isNull();
+    if ((!directSendAvailable && !triggerX0) || !triggerX1Payload) {
         console.error("[!] triggerX0 或 triggerX1Payload 尚未初始化，请等待 hook 捕获");
         return "fail";
     }
@@ -800,7 +806,7 @@ function triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex,
         return "fail: text hook unavailable";
     }
 
-    if (!isReadablePointer(triggerX0) || !isWritablePointer(triggerX1Payload, 0x1a0)) {
+    if (!directSendAvailable && !isReadablePointer(triggerX0)) {
         console.error("[!] StartTask 上下文已失效，等待微信产生新的可写任务上下文");
         return "fail: stale start task context";
     }
@@ -835,11 +841,17 @@ function triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex,
     triggerX1Payload.add(0x190).writePointer(triggerX1Payload.add(0x198));
     sendMsgType = msgType;
 
-    const MMStartTask = new NativeFunction(sendFuncAddr, 'int64', ['pointer', 'pointer']);
+    const MMStartTask = directSendAvailable
+        ? new NativeFunction(sendDirectFuncAddr, 'int64', ['pointer'])
+        : new NativeFunction(sendFuncAddr, 'int64', ['pointer', 'pointer']);
 
     try {
         triggeringStartTask = true;
-        MMStartTask(triggerX0, triggerX1Payload);
+        if (directSendAvailable) {
+            MMStartTask(triggerX1Payload);
+        } else {
+            MMStartTask(triggerX0, triggerX1Payload);
+        }
         return "1";
     } catch (e) {
         console.error("[!] Error trigger " + msgType + " MMStartTask: " + e);
