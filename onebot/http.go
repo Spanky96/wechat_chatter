@@ -15,19 +15,41 @@ import (
 	"time"
 )
 
+const unsafeSendDisabledReason = "后台文本发送未启用；接收消息不受影响"
+const experimentalTextOnlyReason = "微信 4.1.11 当前仅开放实验性文本发送；图片、语音、视频、文件和回复发送仍保持禁用"
+
 func sendStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "仅支持 GET", http.StatusMethodNotAllowed)
+		return
+	}
+	if !config.EnableUnsafeSend {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "disabled",
+			"ready":  false,
+			"reason": unsafeSendDisabledReason,
+		})
 		return
 	}
 	status, _ := callFridaExport("getSendContextStatus").(string)
 	if status == "" {
 		status = "unavailable"
 	}
+	diagnostics := []map[string]any{}
+	if diagnosticsText, ok := callFridaExport("getTextEncoderDiagnostics").(string); ok && diagnosticsText != "" {
+		_ = json.Unmarshal([]byte(diagnosticsText), &diagnostics)
+	}
+	lifecycle := map[string]any{}
+	if lifecycleText, ok := callFridaExport("getTextSendLifecycleDiagnostics").(string); ok && lifecycleText != "" {
+		_ = json.Unmarshal([]byte(lifecycleText), &lifecycle)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"status": status,
-		"ready":  status == "ready",
+		"status":      status,
+		"ready":       status == "ready",
+		"diagnostics": diagnostics,
+		"lifecycle":   lifecycle,
 	})
 }
 
@@ -35,6 +57,15 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "仅支持 POST", http.StatusMethodNotAllowed)
 		Error("仅支持 POST")
+		return
+	}
+	if !config.EnableUnsafeSend {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": unsafeSendDisabledReason,
+		})
+		Warn("拒绝不安全的发送请求", "reason", unsafeSendDisabledReason)
 		return
 	}
 
@@ -49,6 +80,31 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 	if len(req.Message) == 0 || (req.UserID == "" && req.GroupID == "") {
 		http.Error(w, "参数缺失", http.StatusBadRequest)
 		Error("参数缺失")
+		return
+	}
+	for _, segment := range req.Message {
+		if segment == nil || segment.Data == nil {
+			http.Error(w, "消息段无效", http.StatusBadRequest)
+			return
+		}
+		if segment.Type != "text" && segment.Type != "at" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotImplemented)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": experimentalTextOnlyReason,
+			})
+			Warn("拒绝尚未验证的非文本发送请求", "message_type", segment.Type)
+			return
+		}
+	}
+	status, _ := callFridaExport("getSendContextStatus").(string)
+	if status != "ready" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error":  "微信发送上下文当前不可用",
+			"status": status,
+		})
 		return
 	}
 

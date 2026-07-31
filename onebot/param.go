@@ -127,6 +127,7 @@ type SendRequestData struct {
 	File         string         `json:"file,omitempty"`
 	URL          string         `json:"url,omitempty"`
 	QQ           string         `json:"qq,omitempty"`
+	Nickname     string         `json:"nickname,omitempty"`
 	Media        []byte         `json:"media,omitempty"`
 	ReplyMessage *WechatMessage `json:"reply_message,omitempty"`
 }
@@ -143,6 +144,7 @@ type Config struct {
 	WechatPid                int    `json:"wechat_pid"`
 	EnableMediaHooks         bool   `json:"enable_media_hooks"`
 	EnableMediaDownloadHooks bool   `json:"enable_media_download_hooks"`
+	EnableUnsafeSend         bool   `json:"enable_unsafe_send"`
 
 	WechatConf string `json:"wechat_conf"`
 }

@@ -193,16 +193,7 @@ func buildWechatMessageJSON(data *wxproto.WxRecvMsgData) ([]byte, error) {
 			}
 		}
 
-		atUserMatch := regexp.MustCompile(`<atuserlist>([\s\S]*?)</atuserlist>`).FindStringSubmatch(xmlStr)
-		if len(atUserMatch) > 1 {
-			atUsers := strings.Split(atUserMatch[1], ",")
-			for _, atUser := range atUsers {
-				atUser = strings.TrimSpace(atUser)
-				if atUser != "" {
-					messages = append(messages, &Message{Type: "at", Data: &SendRequestData{QQ: atUser}})
-				}
-			}
-		}
+		messages = applyGroupMentions(messages, groupId, parseAtUsers(xmlStr))
 
 		// 处理用户的名称
 		splitIdx := strings.Index(userContent, ":")
@@ -246,6 +237,55 @@ func buildWechatMessageJSON(data *wxproto.WxRecvMsgData) ([]byte, error) {
 	}
 
 	return json.Marshal(wechatMsg)
+}
+
+func parseAtUsers(xmlStr string) []string {
+	match := regexp.MustCompile(`<atuserlist>([\s\S]*?)</atuserlist>`).FindStringSubmatch(xmlStr)
+	if len(match) < 2 {
+		return nil
+	}
+	raw := strings.TrimSpace(match[1])
+	raw = strings.TrimPrefix(raw, "<![CDATA[")
+	raw = strings.TrimSuffix(raw, "]]>")
+	var users []string
+	for _, value := range strings.Split(raw, ",") {
+		user := strings.TrimSpace(value)
+		if user != "" && !strings.ContainsAny(user, "<>") {
+			users = append(users, user)
+		}
+	}
+	return users
+}
+
+func applyGroupMentions(messages []*Message, groupID string, atUsers []string) []*Message {
+	searchFrom := 0
+	for _, atUser := range atUsers {
+		matched := false
+		for index := searchFrom; index < len(messages); index++ {
+			message := messages[index]
+			if message == nil || message.Type != "text" || message.Data == nil {
+				continue
+			}
+			text := strings.TrimSpace(message.Data.Text)
+			if !strings.HasPrefix(text, "@") || len(text) <= 1 {
+				continue
+			}
+			nickname := strings.TrimSpace(strings.TrimPrefix(text, "@"))
+			messages[index] = &Message{Type: "at", Data: &SendRequestData{QQ: atUser, Nickname: nickname}}
+			searchFrom = index + 1
+			matched = true
+			break
+		}
+		if matched {
+			continue
+		}
+		nickname := ""
+		if value, ok := userID2NicknameMap.Load(groupID + "_" + atUser); ok {
+			nickname, _ = value.(string)
+		}
+		messages = append(messages, &Message{Type: "at", Data: &SendRequestData{QQ: atUser, Nickname: nickname}})
+	}
+	return messages
 }
 
 func getMessagesFromProto(content, sender string, mediaContent []byte) []*Message {

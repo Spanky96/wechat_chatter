@@ -47,6 +47,7 @@ func SendWorker() {
 
 func SendWechatMsg(m *SendMsg) {
 	var sendErr error
+	var nativeTextTaskID uint64
 	defer func() {
 		if m.ResultChan != nil {
 			m.ResultChan <- sendErr
@@ -79,12 +80,18 @@ func SendWechatMsg(m *SendMsg) {
 			sendErr = err
 			return
 		}
-		payloadHex := BuildSendPayload(currTaskId, "text")
-		result := callFridaExport("triggerSendTextMessage", currTaskId, targetId, m.Content, m.AtUser, protoHex, payloadHex)
+		result := callFridaExport("triggerSendTextMessage", currTaskId, targetId, m.Content, m.AtUser, protoHex, "")
 		Info("📩 发送文本任务执行结果", "result", result, "task_id", currTaskId, "target_id", targetId, "at_user", m.AtUser)
-		if result != "1" {
+		resultText, ok := result.(string)
+		if !ok || !strings.HasPrefix(resultText, "submitted:") {
 			Error("发送文本失败", "task_id", currTaskId, "target_id", targetId, "result", result)
 			sendErr = fmt.Errorf("send text failed: %v", result)
+			return
+		}
+		Info("📩 微信真实工厂已提交文本任务，等待 ACK", "native_task_id", strings.TrimPrefix(resultText, "submitted:"), "task_id", currTaskId)
+		nativeTextTaskID, err = strconv.ParseUint(strings.TrimPrefix(resultText, "submitted:"), 10, 32)
+		if err != nil || nativeTextTaskID == 0 {
+			sendErr = fmt.Errorf("invalid native text task id: %s", resultText)
 			return
 		}
 	case "image":
@@ -331,6 +338,9 @@ func SendWechatMsg(m *SendMsg) {
 	select {
 	case <-ctx.Done():
 		Error("任务执行超时！", "taskId", currTaskId)
+		if nativeTextTaskID != 0 {
+			callFridaExport("cancelPendingTextMessage", nativeTextTaskID)
+		}
 		sendErr = errors.New("send timeout")
 	case resp := <-buf2RespChan:
 		if resp.Err != nil {
@@ -556,7 +566,13 @@ func HandleBuf2Resp(msgType string, data []byte) {
 
 	ret, errMsg, err := ParseSendMsgResponse(data)
 	if err != nil {
-		Info("buf2resp响应无法提取错误码，视为成功", "msg_type", msgType, "err", err)
+		Error("buf2resp响应无法提取错误码", "msg_type", msgType, "err", err)
+		buf2RespChan <- &Buf2RespData{
+			MsgType: msgType,
+			Data:    data,
+			Err:     fmt.Errorf("cannot parse send response: %w", err),
+		}
+		return
 	}
 
 	// 判断错误码是否为0

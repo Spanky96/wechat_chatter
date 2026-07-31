@@ -60,6 +60,22 @@ function initAddresses() {
     sendDirectFuncAddr = {{if .sendDirectFuncAddr}}baseAddr.add({{.sendDirectFuncAddr}}){{else}}ptr(0){{end}};
     buf2RespAddr = baseAddr.add({{.buf2RespAddr}});
 
+    realTextSendAsyncAddr = {{if .realTextSendAsyncAddr}}baseAddr.add({{.realTextSendAsyncAddr}}){{else}}ptr(0){{end}};
+    realTextSubmitAsyncAddr = {{if .realTextSubmitAsyncAddr}}baseAddr.add({{.realTextSubmitAsyncAddr}}){{else}}ptr(0){{end}};
+    realTextManagerProviderAddr = {{if .realTextManagerProviderAddr}}baseAddr.add({{.realTextManagerProviderAddr}}){{else}}ptr(0){{end}};
+    realTextSendFactoryAddr = {{if .realTextSendFactoryAddr}}baseAddr.add({{.realTextSendFactoryAddr}}){{else}}ptr(0){{end}};
+    realTextRequestCtorAddr = {{if .realTextRequestCtorAddr}}baseAddr.add({{.realTextRequestCtorAddr}}){{else}}ptr(0){{end}};
+    realTextEncoderAddr = {{if .realTextEncoderAddr}}baseAddr.add({{.realTextEncoderAddr}}){{else}}ptr(0){{end}};
+    realTextResponseAddr = {{if .realTextResponseAddr}}baseAddr.add({{.realTextResponseAddr}}){{else}}ptr(0){{end}};
+    realTextReq2BufAddr = {{if .realTextReq2BufAddr}}baseAddr.add({{.realTextReq2BufAddr}}){{else}}ptr(0){{end}};
+    realTextAutoBufferDataAddr = {{if .realTextAutoBufferDataAddr}}baseAddr.add({{.realTextAutoBufferDataAddr}}){{else}}ptr(0){{end}};
+    realTextAutoBufferLengthAddr = {{if .realTextAutoBufferLengthAddr}}baseAddr.add({{.realTextAutoBufferLengthAddr}}){{else}}ptr(0){{end}};
+    realTextPayloadCtorAddr = {{if .realTextPayloadCtorAddr}}baseAddr.add({{.realTextPayloadCtorAddr}}){{else}}ptr(0){{end}};
+    realTextParseFromArrayAddr = {{if .realTextParseFromArrayAddr}}baseAddr.add({{.realTextParseFromArrayAddr}}){{else}}ptr(0){{end}};
+    realTextPayloadDtorAddr = {{if .realTextPayloadDtorAddr}}baseAddr.add({{.realTextPayloadDtorAddr}}){{else}}ptr(0){{end}};
+    realTextResultDtorAddr = {{if .realTextResultDtorAddr}}baseAddr.add({{.realTextResultDtorAddr}}){{else}}ptr(0){{end}};
+    realTextFutureDtorAddr = {{if .realTextFutureDtorAddr}}baseAddr.add({{.realTextFutureDtorAddr}}){{else}}ptr(0){{end}};
+
     uploadImageAddr = baseAddr.add({{.uploadImageAddr}});
     cndOnCompleteAddr = baseAddr.add({{.cndOnCompleteAddr}});
 
@@ -78,30 +94,11 @@ function initAddresses() {
     replyMessageCallbackFunc = baseAddr.add(0x0);
     voiceMessageCallbackFunc = baseAddr.add(0x0);
 
-    setupRetOneStub();  // 必须同步先执行，初始化fakeVtable
     scheduleHookSetup("消息接收", setReceiver);
-    scheduleHookSetup("文本消息内存", setupSendTextMessageDynamic);
-    scheduleHookSetup("文本消息编码", attachBlrX8Hook);
-    scheduleHookSetup("StartTask", AttachSendFunc);
-    scheduleHookSetup("Req2Buf", attachReq2buf);
-    {{if .EnableMediaHooks}}
-    scheduleHookSetup("文件消息内存", setupSendFileMessageDynamic);
-    scheduleHookSetup("文件上传内存", setupSendFileUploadMessageDynamic);
-    scheduleHookSetup("附件消息内存", setupSendAppAttachMessageDynamic);
-    scheduleHookSetup("图片消息内存", setupSendImgMessageDynamic);
-    scheduleHookSetup("媒体上传", attachUploadMedia);
-    scheduleHookSetup("CDN 完成回调", patchCdnOnComplete);
-    scheduleHookSetup("上传回调", attachGetCallbackFromWrapper);
-    scheduleHookSetup("回复消息内存", setupSendReplyMessageDynamic);
-    scheduleHookSetup("文件下载内存", setupDownloadFileDynamic);
-    scheduleHookSetup("媒体下载", attachMediaDownloadHooks);
+    {{if .EnableUnsafeSend}}
+    scheduleHookSetup("真实工厂文本发送", setupRealTextSend);
     {{else}}
-    {{if .EnableMediaDownloadHooks}}
-    scheduleHookSetup("媒体下载", attachMediaDownloadHooks);
-    console.log("[safe-mode] 仅启用被动媒体下载监听与文本发送");
-    {{else}}
-    console.log("[safe-mode] 媒体上传下载 Hook 已禁用，仅启用消息监听与文本发送");
-    {{end}}
+    console.log("[receive-only] 后台发送及媒体 Hook 已禁用，仅启用消息接收");
     {{end}}
 }
 
@@ -284,6 +281,47 @@ var sendDirectFuncAddr = ptr(0);
 var insertMsgAddr = ptr(0);
 var sendMsgType = "";
 var buf2RespAddr;
+var receiverHookReady = false;
+
+var realTextSendAsyncAddr;
+var realTextSubmitAsyncAddr;
+var realTextManagerProviderAddr;
+var realTextSendFactoryAddr;
+var realTextRequestCtorAddr;
+var realTextEncoderAddr;
+var realTextResponseAddr;
+var realTextReq2BufAddr;
+var realTextAutoBufferDataAddr;
+var realTextAutoBufferLengthAddr;
+var realTextPayloadCtorAddr;
+var realTextParseFromArrayAddr;
+var realTextPayloadDtorAddr;
+var realTextResultDtorAddr;
+var realTextFutureDtorAddr;
+var nativeRealTextSubmitAsync = null;
+var nativeRealTextManagerProvider = null;
+var nativeRealTextManagerGetter = null;
+var nativeRealTextPayloadCtor = null;
+var nativeRealTextParseFromArray = null;
+var nativeRealTextPayloadDtor = null;
+var nativeRealTextFutureDtor = null;
+var nativeRealTextAutoBufferData = null;
+var nativeRealTextAutoBufferLength = null;
+var realTextSendReady = false;
+var realTextSendStatus = "unavailable";
+var realTextTraceActive = false;
+var realTextTraceEnteredFactory = false;
+var realTextTraceFactoryTaskId = 0;
+var realTextTraceReachedReq2Buf = false;
+var realTextTraceReq2BufTaskIds = [];
+var realTextTraceRequest = ptr(0);
+var pendingRealTextRequest = ptr(0);
+var realTextManualEncoderCaptures = 0;
+var realTextEncoderDiagnostics = [];
+var realTextLifecycleDiagnostics = {};
+var realTextAckHookReady = false;
+var pendingRealTextFuture = ptr(0);
+var realTextReadyAfter = 0;
 
 var uploadImageAddr;
 var cndOnCompleteAddr;
@@ -589,18 +627,428 @@ function attachBlrX8Hook() {
 }
 
 
+function zeroMemory(addr, size) {
+    addr.writeByteArray(new Uint8Array(size));
+}
+
+function readProtoVarint(bytes, offset) {
+    var value = 0;
+    var scale = 1;
+    for (var i = 0; i < 10 && offset + i < bytes.length; i++) {
+        var current = bytes[offset + i];
+        value += (current & 0x7f) * scale;
+        if ((current & 0x80) === 0) return { value: value, next: offset + i + 1 };
+        scale *= 128;
+    }
+    return null;
+}
+
+function summarizeProtoShape(bytes, depth) {
+    var fields = [];
+    var offset = 0;
+    var fieldCount = 0;
+    while (offset < bytes.length && fieldCount++ < 64) {
+        var key = readProtoVarint(bytes, offset);
+        if (!key || key.value === 0) return fields.concat(["invalid@" + offset]).join(",");
+        offset = key.next;
+        var fieldNumber = Math.floor(key.value / 8);
+        var wireType = key.value % 8;
+        if (wireType === 0) {
+            var scalar = readProtoVarint(bytes, offset);
+            if (!scalar) return fields.concat([fieldNumber + ":bad-varint"]).join(",");
+            fields.push(fieldNumber + ":v" + (scalar.value <= 16 ? "=" + scalar.value : ""));
+            offset = scalar.next;
+        } else if (wireType === 1) {
+            fields.push(fieldNumber + ":i64");
+            offset += 8;
+        } else if (wireType === 2) {
+            var size = readProtoVarint(bytes, offset);
+            if (!size || size.value < 0 || size.next + size.value > bytes.length) {
+                return fields.concat([fieldNumber + ":bad-len"]).join(",");
+            }
+            var start = size.next;
+            var end = start + size.value;
+            var nested = "";
+            if (depth === 0 && fieldNumber === 2) {
+                nested = "{" + summarizeProtoShape(bytes.subarray(start, end), depth + 1) + "}";
+            }
+            fields.push(fieldNumber + ":len=" + size.value + nested);
+            offset = end;
+        } else if (wireType === 5) {
+            fields.push(fieldNumber + ":i32");
+            offset += 4;
+        } else {
+            return fields.concat([fieldNumber + ":wire=" + wireType]).join(",");
+        }
+        if (offset > bytes.length) return fields.concat(["truncated"]).join(",");
+    }
+    return fields.join(",");
+}
+
+function findTextRequestInTaskMap(session, taskId) {
+    var end = session.add(0x60);
+    var node = readPointerIfReadable(end);
+    for (var i = 0; node && !node.isNull() && !node.equals(end) && i < 256; i++) {
+        if (!isReadablePointer(node.add(0x28))) return null;
+        var key = node.add(0x20).readU32();
+        if (key === taskId) return readPointerIfReadable(node.add(0x28));
+        node = readPointerIfReadable(node.add(key < taskId ? 0x8 : 0x0));
+    }
+    return null;
+}
+
+function createRealTextSubmitTrampoline(target) {
+    // Three pointer-sized fields force ARM64's indirect-result ABI (x8). The actual
+    // C++ future occupies the first two fields; the third is only ABI padding here.
+    var invokeSubmit = new NativeFunction(target,
+        ['pointer', 'pointer', 'pointer'],
+        ['pointer', 'pointer', 'pointer', 'pointer']);
+    return function (manager, payload, options1, options2, result) {
+        var returned = invokeSubmit(manager, payload, options1, options2);
+        result.writePointer(returned[0]);
+        result.add(Process.pointerSize).writePointer(returned[1]);
+    };
+}
+
+function releasePendingRealTextFuture() {
+    if (pendingRealTextFuture.isNull()) return;
+    var future = pendingRealTextFuture;
+    pendingRealTextFuture = ptr(0);
+    setTimeout(function () {
+        try {
+            nativeRealTextFutureDtor(future);
+        } catch (error) {
+            console.error("[experimental-send] future 释放失败: " + error);
+        }
+    }, 0);
+}
+
+function getRealTextManager() {
+    var provider = nativeRealTextManagerProvider();
+    if (!provider || provider.isNull()) {
+        throw new Error("text manager provider unavailable");
+    }
+    if (nativeRealTextManagerGetter === null) {
+        var vtable = provider.readPointer();
+        var getterAddress = vtable.isNull() ? ptr(0) : vtable.add(0x18).readPointer();
+        if (!getterAddress || getterAddress.isNull()) {
+            throw new Error("text manager getter unavailable");
+        }
+        nativeRealTextManagerGetter = new NativeFunction(getterAddress, 'pointer', ['pointer']);
+    }
+    var manager = nativeRealTextManagerGetter(provider);
+    if (!manager || manager.isNull()) {
+        throw new Error("text manager unavailable");
+    }
+    return manager;
+}
+
+function isRealTextManagerProviderReady() {
+    if (nativeRealTextManagerProvider === null) return false;
+    try {
+        var provider = nativeRealTextManagerProvider();
+        return !!provider && !provider.isNull();
+    } catch (error) {
+        return false;
+    }
+}
+
+function readRealTextAutoBuffer(autoBuffer) {
+    if (!autoBuffer || autoBuffer.isNull()) return null;
+    try {
+        var dataAddress = nativeRealTextAutoBufferData(autoBuffer, 0);
+        var lengthValue = nativeRealTextAutoBufferLength(autoBuffer);
+        var length = Number(lengthValue.toString());
+        if (!dataAddress || dataAddress.isNull() || length <= 0 || length > MAX_FRIDA_MESSAGE_BYTES) {
+            return null;
+        }
+        var data = dataAddress.readByteArray(length);
+        return data ? { data: data, length: length } : null;
+    } catch (error) {
+        return null;
+    }
+}
+
+function setupRealTextSend() {
+    var requiredAddresses = [
+        realTextSubmitAsyncAddr,
+        realTextManagerProviderAddr,
+        realTextSendFactoryAddr,
+        realTextRequestCtorAddr,
+        realTextEncoderAddr,
+        realTextResponseAddr,
+        realTextReq2BufAddr,
+        realTextAutoBufferDataAddr,
+        realTextAutoBufferLengthAddr,
+        realTextPayloadCtorAddr,
+        realTextParseFromArrayAddr,
+        realTextPayloadDtorAddr,
+        realTextFutureDtorAddr,
+    ];
+    if (requiredAddresses.some(function (address) { return address.isNull(); })) {
+        console.error("[experimental-send] 当前微信版本未配置真实工厂文本发送地址");
+        return false;
+    }
+    nativeRealTextSubmitAsync = createRealTextSubmitTrampoline(realTextSubmitAsyncAddr);
+    nativeRealTextManagerProvider = new NativeFunction(realTextManagerProviderAddr, 'pointer', []);
+    nativeRealTextPayloadCtor = new NativeFunction(realTextPayloadCtorAddr, 'void', ['pointer']);
+    nativeRealTextParseFromArray = new NativeFunction(realTextParseFromArrayAddr, 'int', ['pointer', 'pointer', 'int']);
+    nativeRealTextPayloadDtor = new NativeFunction(realTextPayloadDtorAddr, 'void', ['pointer']);
+    nativeRealTextFutureDtor = new NativeFunction(realTextFutureDtorAddr, 'void', ['pointer']);
+    nativeRealTextAutoBufferData = new NativeFunction(realTextAutoBufferDataAddr, 'pointer', ['pointer', 'int']);
+    nativeRealTextAutoBufferLength = new NativeFunction(realTextAutoBufferLengthAddr, 'uint64', ['pointer']);
+    Interceptor.attach(realTextSubmitAsyncAddr, {
+        onEnter: function (args) {
+            if (!realTextTraceActive) return;
+            realTextLifecycleDiagnostics.submitEntered = true;
+        },
+        onLeave: function () {
+            if (realTextTraceActive) realTextLifecycleDiagnostics.submitReturned = true;
+        },
+    });
+    Interceptor.attach(realTextSendFactoryAddr, {
+        onEnter: function () {
+            if (!realTextTraceActive) return;
+            realTextTraceEnteredFactory = true;
+            console.log("[experimental-send] 已进入微信真实文本工厂");
+        },
+        onLeave: function (retval) {
+            if (!realTextTraceActive) return;
+            realTextTraceFactoryTaskId = retval.toUInt32();
+            realTextLifecycleDiagnostics.factoryTaskId = realTextTraceFactoryTaskId;
+            console.log("[experimental-send] 微信真实文本工厂返回 taskId=" + realTextTraceFactoryTaskId);
+            if (realTextTraceFactoryTaskId !== 0) {
+                pendingBuf2RespTaskId = realTextTraceFactoryTaskId;
+                pendingRealTextRequest = realTextTraceRequest;
+                pendingSendMsgType = "text";
+            }
+            if (realTextTraceReq2BufTaskIds.indexOf(realTextTraceFactoryTaskId) !== -1) {
+                realTextTraceReachedReq2Buf = true;
+                console.log("[experimental-send] 文本任务已在工厂返回前进入 Req2Buf taskId=" +
+                    realTextTraceFactoryTaskId);
+            }
+        },
+    });
+    Interceptor.attach(realTextRequestCtorAddr, {
+        onEnter: function (args) {
+            if (!realTextTraceActive) return;
+            realTextTraceRequest = args[0];
+        },
+    });
+    Interceptor.attach(realTextEncoderAddr, {
+        onEnter: function (args) {
+            var request = args[0];
+            var isBackground = (!realTextTraceRequest.isNull() && request.equals(realTextTraceRequest)) ||
+                (!pendingRealTextRequest.isNull() && request.equals(pendingRealTextRequest));
+            if (!isBackground && realTextManualEncoderCaptures >= 4) return;
+            this.captureTextEncoding = true;
+            this.encodingOrigin = isBackground ? "background" : "manual";
+            this.encodingTaskId = isBackground ? (realTextTraceFactoryTaskId || pendingBuf2RespTaskId) : 0;
+            this.encodingBuffer = args[1];
+            if (isBackground) realTextLifecycleDiagnostics.encoderReached = true;
+            if (!isBackground) realTextManualEncoderCaptures++;
+        },
+        onLeave: function () {
+            if (!this.captureTextEncoding) return;
+            var encoded = readRealTextAutoBuffer(this.encodingBuffer);
+            if (!encoded) return;
+            var shape = summarizeProtoShape(new Uint8Array(encoded.data), 0);
+            realTextEncoderDiagnostics.push({
+                origin: this.encodingOrigin,
+                taskId: this.encodingTaskId,
+                length: encoded.length,
+                shape: shape,
+            });
+            if (realTextEncoderDiagnostics.length > 8) realTextEncoderDiagnostics.shift();
+            console.log("[experimental-send] 文本编码摘要 origin=" + this.encodingOrigin +
+                " taskId=" + this.encodingTaskId + " len=" + encoded.length + " shape=" + shape);
+        },
+    });
+    Interceptor.attach(realTextResponseAddr, {
+        onEnter: function (args) {
+            var request = args[0];
+            var autoBuffer = args[1];
+            if (pendingBuf2RespTaskId === 0 || pendingRealTextRequest.isNull() ||
+                !request.equals(pendingRealTextRequest)) return;
+
+            var responseTaskId = pendingBuf2RespTaskId;
+            realTextLifecycleDiagnostics.responseReached = true;
+
+            var response = readRealTextAutoBuffer(autoBuffer);
+            var responseBytes = response ? response.data : null;
+
+            var msgType = pendingSendMsgType;
+            pendingBuf2RespTaskId = 0;
+            pendingRealTextRequest = ptr(0);
+            pendingSendMsgType = "";
+            releasePendingRealTextFuture();
+            if (!responseBytes) {
+                console.error("[experimental-send] 文本 ACK 读取失败 taskId=" + responseTaskId);
+                send({ type: "buf2resp", msg_type: msgType, data: [] });
+                return;
+            }
+
+            var bytes = new Uint8Array(responseBytes);
+            console.log("[experimental-send] 收到文本 ACK taskId=" + responseTaskId + " len=" + bytes.length);
+            send({ type: "buf2resp", msg_type: msgType, data: Array.from(bytes) });
+        },
+    });
+    Interceptor.attach(realTextReq2BufAddr, {
+        onEnter: function (args) {
+            var req2BufTaskId = args[1].toUInt32();
+            if (realTextTraceActive) realTextTraceReq2BufTaskIds.push(req2BufTaskId);
+            var tracedTaskId = realTextTraceFactoryTaskId || pendingBuf2RespTaskId;
+            if (tracedTaskId === 0 || req2BufTaskId !== tracedTaskId) return;
+            realTextTraceReachedReq2Buf = true;
+            var mappedRequest = findTextRequestInTaskMap(args[0], req2BufTaskId);
+            var mapHit = mappedRequest !== null && !mappedRequest.isNull();
+            realTextLifecycleDiagnostics.req2bufTaskId = req2BufTaskId;
+            realTextLifecycleDiagnostics.req2bufMapHit = mapHit;
+            console.log("[experimental-send] 文本任务进入 Req2Buf taskId=" + req2BufTaskId +
+                " mapHit=" + mapHit);
+        },
+    });
+    realTextAckHookReady = true;
+    realTextSendReady = true;
+    realTextSendStatus = "ready";
+    realTextReadyAfter = Date.now() + 15000;
+    console.log("[experimental-send] 仅启用真实工厂文本发送；旧 Req2Buf/map 注入与媒体发送保持禁用");
+    return true;
+}
+
 function triggerSendTextMessage(taskId, receiver, content, atUser, protoHex, payloadHex) {
-    return triggerSendMediaMessage(taskId, "", receiver, protoHex, payloadHex, "text");
+    if (!realTextSendReady || !realTextAckHookReady) {
+        return "fail: real text sender or ACK hook unavailable";
+    }
+    if (!protoHex || protoHex.length === 0 || (protoHex.length % 2) !== 0) {
+        return "fail: invalid text protobuf";
+    }
+    if (pendingBuf2RespTaskId !== 0) return "fail: another send is awaiting ack";
+
+    var protoBytes = hexToByteArray(protoHex);
+    var protoAddr = Memory.alloc(protoBytes.length);
+    var state = Memory.alloc(0x90);
+    var future = Memory.alloc(0x20);
+    var payload = state.add(0x20);
+    var payloadConstructed = false;
+    var stage = "allocate";
+
+    zeroMemory(state, 0x90);
+    zeroMemory(future, 0x20);
+    protoAddr.writeByteArray(protoBytes);
+
+    try {
+        stage = "payload-constructor";
+        nativeRealTextPayloadCtor(payload);
+        payloadConstructed = true;
+        stage = "protobuf-parse";
+        if (nativeRealTextParseFromArray(payload, protoAddr, protoBytes.length) !== 1) {
+            return "fail: WeChat rejected text protobuf";
+        }
+
+        stage = "async-submit";
+        realTextTraceActive = true;
+        realTextTraceEnteredFactory = false;
+        realTextTraceFactoryTaskId = 0;
+        realTextTraceReachedReq2Buf = false;
+        realTextTraceReq2BufTaskIds = [];
+        realTextTraceRequest = ptr(0);
+        realTextLifecycleDiagnostics = {
+            submissionPath: "async-no-wait",
+            factoryTaskId: 0,
+            req2bufTaskId: 0,
+            req2bufMapHit: false,
+            encoderReached: false,
+            responseReached: false,
+            submitEntered: false,
+            submitReturned: false,
+        };
+        pendingRealTextFuture = future;
+        stage = "manager-provider";
+        var manager = getRealTextManager();
+        stage = "async-submit";
+        nativeRealTextSubmitAsync(
+            manager,
+            payload,
+            state.add(0x50),
+            state.add(0x68),
+            future);
+
+        return new Promise(function (resolve) {
+            var deadline = Date.now() + 3000;
+            function waitForFactory() {
+                if (realTextTraceFactoryTaskId !== 0) {
+                    var nativeTaskId = realTextTraceFactoryTaskId;
+                    realTextTraceActive = false;
+                    console.log("[experimental-send] 异步文本任务已提交 taskId=" + nativeTaskId);
+                    resolve("submitted:" + nativeTaskId);
+                    return;
+                }
+                if (Date.now() >= deadline) {
+                    realTextTraceActive = false;
+                    pendingBuf2RespTaskId = 0;
+                    pendingRealTextRequest = ptr(0);
+                    pendingSendMsgType = "";
+                    releasePendingRealTextFuture();
+                    resolve("fail: async text factory did not run");
+                    return;
+                }
+                setTimeout(waitForFactory, 10);
+            }
+            waitForFactory();
+        });
+    } catch (error) {
+        realTextTraceActive = false;
+        pendingBuf2RespTaskId = 0;
+        pendingRealTextRequest = ptr(0);
+        pendingSendMsgType = "";
+        releasePendingRealTextFuture();
+        realTextLifecycleDiagnostics.failureStage = stage;
+        realTextLifecycleDiagnostics.failureAddress = error.address ? error.address.toString() : "";
+        if (stage === "manager-provider") {
+            realTextSendReady = true;
+            realTextSendStatus = "ready";
+        } else {
+            realTextSendReady = false;
+            realTextSendStatus = "faulted";
+        }
+        return "fail: real text send fault at " + stage + ": " + error +
+            " factory_entered=" + realTextTraceEnteredFactory +
+            " factory_task_id=" + realTextTraceFactoryTaskId +
+            " req2buf=" + realTextTraceReachedReq2Buf;
+    } finally {
+        if (payloadConstructed) {
+            try { nativeRealTextPayloadDtor(payload); } catch (error) {
+                console.error("[experimental-send] payload 析构失败: " + error);
+            }
+        }
+    }
 }
 
 function getSendContextStatus() {
-    if (!triggerX1Payload) return "waiting";
-    if (sendDirectFuncAddr && !sendDirectFuncAddr.isNull()) {
-        return "ready";
-    }
-    if (!triggerX0) return "waiting";
-    if (!isReadablePointer(triggerX0)) return "stale-manager";
-    return "ready";
+    if (realTextSendStatus === "faulted") return "faulted";
+    if (!realTextAckHookReady) return "ack-unavailable";
+    if (pendingBuf2RespTaskId !== 0) return "busy";
+    if (Date.now() < realTextReadyAfter) return "warming_up";
+    if (!isRealTextManagerProviderReady()) return "warming_up";
+    return realTextSendStatus;
+}
+
+function getTextEncoderDiagnostics() {
+    return JSON.stringify(realTextEncoderDiagnostics);
+}
+
+function getTextSendLifecycleDiagnostics() {
+    return JSON.stringify(realTextLifecycleDiagnostics);
+}
+
+function cancelPendingTextMessage(taskId) {
+    if (pendingBuf2RespTaskId === 0 || pendingBuf2RespTaskId !== Number(taskId)) return false;
+    pendingBuf2RespTaskId = 0;
+    pendingRealTextRequest = ptr(0);
+    pendingSendMsgType = "";
+    releasePendingRealTextFuture();
+    return true;
 }
 
 function AttachSendFunc() {
@@ -1093,6 +1541,9 @@ function triggerSendVoiceMessage(taskId, sender, receiver, protoHex, payloadHex)
 
 rpc.exports = {
     getSendContextStatus: getSendContextStatus,
+    getTextEncoderDiagnostics: getTextEncoderDiagnostics,
+    getTextSendLifecycleDiagnostics: getTextSendLifecycleDiagnostics,
+    cancelPendingTextMessage: cancelPendingTextMessage,
     triggerSendImgMessage: triggerSendImgMessage,
     triggerUploadImg: triggerUploadImg,
     triggerSendTextMessage: triggerSendTextMessage,
@@ -1124,39 +1575,11 @@ function setupDownloadFileDynamic() {
 function setReceiver() {
 	Interceptor.attach(buf2RespAddr, {
 		onEnter: function (args) {
-			// 通过 SP+0x140 读取当前 buf2resp 对应的 taskId
-			var respTaskId = this.context.sp.add(0x140).readS32();
 				const currentPtr = this.context.x20;
 				const x2 = this.context.x0.toInt32();
 	            if (!isReadablePointer(currentPtr) || x2 < 4 || x2 > MAX_FRIDA_MESSAGE_BYTES) {
 					return;
 	            }
-
-            // 判断是否是我们发送的消息的 ack
-            if (pendingBuf2RespTaskId !== 0 && respTaskId === pendingBuf2RespTaskId) {
-                // 清理 insertMsgAddr
-                if (!pendingInsertMsgAddr.isNull()) {
-                    pendingInsertMsgAddr.writeU64(0x0);
-                    console.log("[+] buf2resp: 已清理 insertMsgAddr, msgType=" + pendingSendMsgType + " taskId=" + respTaskId);
-                    pendingInsertMsgAddr = ptr(0);
-                }
-
-                // 读取响应数据
-				var respData = x2 >= 4 && x2 <= MAX_FRIDA_MESSAGE_BYTES ? readByteArrayIfReadable(currentPtr, x2) : null;
-				if (respData) {
-					var bytes = new Uint8Array(respData);
-					console.log("[+] buf2resp: 收到响应, msgType=" + pendingSendMsgType + " taskId=" + respTaskId + " len=" + x2);
-					send({
-						type: "buf2resp",
-						msg_type: pendingSendMsgType,
-						data: Array.from(bytes),
-					});
-				}
-
-				pendingBuf2RespTaskId = 0;
-				pendingSendMsgType = "";
-				return
-            }
 
             const mem = readByteArrayIfReadable(currentPtr, x2);
             if (!mem) {
@@ -1175,7 +1598,8 @@ function setReceiver() {
                 data: Array.from(uint8Array),
             })
         },
-    });
+	});
+	receiverHookReady = true;
 	console.log("[+] 消息接收 Hook 已启用");
 }
 

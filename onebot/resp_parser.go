@@ -14,7 +14,7 @@ import (
 //   - voice: BaseResponse 在 field 10 → SendVoiceMsgResponse
 //
 // 返回 (ret, errMsg, error)
-// 如果两种格式都无法提取到有效的 BaseResponse，返回 ret=0 视为成功
+// 如果两种格式都无法提取到有效的 BaseResponse，返回错误，禁止误报发送成功。
 func ParseSendMsgResponse(data []byte) (int32, string, error) {
 	// 尝试格式1: BaseResponse 在 field 1 (text/video/image/file/reply)
 	resp1 := &wxproto.SendMsgResponse{}
@@ -40,6 +40,6 @@ func ParseSendMsgResponse(data []byte) (int32, string, error) {
 		}
 	}
 
-	// 两种格式都未提取到 BaseResponse，视为成功
+	// 两种格式都未提取到 BaseResponse，不能证明服务端已接受消息。
 	return 0, "", fmt.Errorf("unable to extract BaseResponse from response")
 }
