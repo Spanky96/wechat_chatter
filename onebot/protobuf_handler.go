@@ -168,13 +168,17 @@ func buildWechatMessageJSON(data *wxproto.WxRecvMsgData) ([]byte, error) {
 			sender, receiver, len(content), msgId)
 	}
 
-	selfId := receiver
-	if strings.Contains(receiver, "@chatroom") {
-		selfId = sender
+	selfId := myWechatId
+	if selfId == "" {
+		selfId = receiver
+		if strings.Contains(receiver, "@chatroom") {
+			selfId = sender
+		}
 	}
 	msgType := "private"
 	groupId := ""
 	senderUser := sender
+	conversationUser := sender
 	senderNickname := ""
 	messages := getMessagesFromProto(content, sender, data.MediaContent)
 	if len(messages) == 0 {
@@ -192,6 +196,7 @@ func buildWechatMessageJSON(data *wxproto.WxRecvMsgData) ([]byte, error) {
 				senderUser = candidate
 			}
 		}
+		conversationUser = senderUser
 
 		messages = applyGroupMentions(messages, groupId, parseAtUsers(xmlStr))
 
@@ -208,6 +213,10 @@ func buildWechatMessageJSON(data *wxproto.WxRecvMsgData) ([]byte, error) {
 			senderNickname = senderUser
 		}
 	} else {
+		// 私聊事件中 sender 是实际作者；自己发出的消息要归入 receiver 对应的会话。
+		if myWechatId != "" && sender == myWechatId {
+			conversationUser = receiver
+		}
 		splitIdx := strings.Index(userContent, ":")
 		if splitIdx != -1 {
 			senderNickname = strings.TrimSpace(userContent[:splitIdx])
@@ -224,7 +233,7 @@ func buildWechatMessageJSON(data *wxproto.WxRecvMsgData) ([]byte, error) {
 	wechatMsg := &WechatMessage{
 		GroupId:     groupId,
 		SelfID:      selfId,
-		UserID:      senderUser,
+		UserID:      conversationUser,
 		Sender:      &Sender{UserID: senderUser, Nickname: senderNickname},
 		Time:        time.Now().UnixMilli(),
 		PostType:    "message",
