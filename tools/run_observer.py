@@ -7,6 +7,7 @@ console.log 通过一个 shim 转发成 send(), 由 on_message 写入日志文�
 
 用法: python3 run_observer.py <wechat_pid> <script.js> <logfile>
 """
+import os
 import sys
 import threading
 
@@ -23,6 +24,11 @@ SHIM = (
     "try{send(s)}catch(e){}"
     "return o.apply(console,arguments)"
     "}})(console.log);\n"
+)
+
+MESSAGE_WAL_FDS = os.environ.get("MESSAGE_WAL_FDS", "")
+FD_PREFIX = "var OBSERVED_MESSAGE_WAL_FDS=[%s];\n" % ",".join(
+    value for value in MESSAGE_WAL_FDS.split(",") if value.isdigit()
 )
 
 out = open(LOG_PATH, "a", buffering=1)
@@ -52,7 +58,7 @@ def main():
     session = device.attach(PID)
     session.on("detached", on_detached)
     with open(SCRIPT_PATH) as f:
-        src = SHIM + f.read()
+        src = SHIM + FD_PREFIX + f.read()
     script = session.create_script(src)
     script.on("message", on_message)
     script.load()
