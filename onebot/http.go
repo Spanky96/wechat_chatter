@@ -16,19 +16,43 @@ import (
 )
 
 const unsafeSendDisabledReason = "后台文本发送未启用；接收消息不受影响"
-const experimentalTextOnlyReason = "微信 4.1.11 当前仅开放实验性文本发送；图片、语音、视频、文件和回复发送仍保持禁用"
+const experimentalTextOnlyReason = "微信 4.1.11 当前仅开放实验性文本和小程序卡片发送；图片、语音、视频、文件和回复发送仍保持禁用"
+const miniProgramDisabledReason = "小程序卡片发送 Hook 已禁用；当前版本微信的旧 Hook 存在崩溃风险"
 
 func sendStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "仅支持 GET", http.StatusMethodNotAllowed)
 		return
 	}
+	receiveStatus := map[string]any{
+		"status": "unavailable",
+		"ready":  false,
+	}
+	if receiveText, ok := callFridaExport("getReceiveContextStatus").(string); ok && receiveText != "" {
+		_ = json.Unmarshal([]byte(receiveText), &receiveStatus)
+	}
 	if !config.EnableUnsafeSend {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"status": "disabled",
-			"ready":  false,
-			"reason": unsafeSendDisabledReason,
+			"status":  "disabled",
+			"ready":   false,
+			"reason":  unsafeSendDisabledReason,
+			"receive": receiveStatus,
+		})
+		return
+	}
+	if !config.EnableMiniProgramSend {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "ready",
+			"ready":  true,
+			"reason": "",
+			"mini_program": map[string]any{
+				"status": "disabled",
+				"ready":  false,
+				"reason": miniProgramDisabledReason,
+			},
+			"receive": receiveStatus,
 		})
 		return
 	}
@@ -44,10 +68,16 @@ func sendStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if lifecycleText, ok := callFridaExport("getTextSendLifecycleDiagnostics").(string); ok && lifecycleText != "" {
 		_ = json.Unmarshal([]byte(lifecycleText), &lifecycle)
 	}
+	miniProgramStatus, _ := callFridaExport("getMiniProgramSendStatus").(string)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"status":      status,
-		"ready":       status == "ready",
+		"status": status,
+		"ready":  status == "ready",
+		"mini_program": map[string]any{
+			"status": miniProgramStatus,
+			"ready":  miniProgramStatus == "ready",
+		},
+		"receive":     receiveStatus,
 		"diagnostics": diagnostics,
 		"lifecycle":   lifecycle,
 	})
@@ -87,7 +117,7 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "消息段无效", http.StatusBadRequest)
 			return
 		}
-		if segment.Type != "text" && segment.Type != "at" {
+		if segment.Type != "text" && segment.Type != "at" && segment.Type != "mini_program" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotImplemented)
 			json.NewEncoder(w).Encode(map[string]string{
@@ -97,7 +127,14 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	status, _ := callFridaExport("getSendContextStatus").(string)
+	statusExport := "getSendContextStatus"
+	for _, segment := range req.Message {
+		if segment.Type == "mini_program" {
+			statusExport = "getMiniProgramSendStatus"
+			break
+		}
+	}
+	status, _ := callFridaExport(statusExport).(string)
 	if status != "ready" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -140,6 +177,27 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 				ResultChan: ch,
 			}
 			msgChan <- msg
+			resultChans = append(resultChans, ch)
+		} else if v.Type == "mini_program" {
+			if v.Data.AppID == "" || v.Data.Username == "" || v.Data.PagePath == "" || v.Data.Title == "" {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "mini_program 缺少 appid、username、pagepath 或 title"})
+				return
+			}
+			ch := make(chan error, 1)
+			msgChan <- &SendMsg{
+				UserId:      req.UserID,
+				GroupID:     req.GroupID,
+				Type:        "mini_program",
+				Title:       v.Data.Title,
+				Description: v.Data.Description,
+				AppID:       v.Data.AppID,
+				Username:    v.Data.Username,
+				PagePath:    v.Data.PagePath,
+				ThumbURL:    v.Data.ThumbURL,
+				ResultChan:  ch,
+			}
 			resultChans = append(resultChans, ch)
 		} else if v.Type == "reply" {
 			if v.Data.ReplyMessage == nil {

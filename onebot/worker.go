@@ -213,6 +213,22 @@ func SendWechatMsg(m *SendMsg) {
 			sendErr = errors.New("send reply failed")
 			return
 		}
+	case "mini_program":
+		info := &MiniProgramInfo{Title: m.Title, Description: m.Description, AppID: m.AppID, Username: m.Username, PagePath: m.PagePath, ThumbURL: m.ThumbURL}
+		protoHex, err := BuildMiniProgramMsgProto(myWechatId, targetId, info)
+		if err != nil {
+			Error("构建小程序卡片 protobuf 失败", "err", err)
+			sendErr = err
+			return
+		}
+		payloadHex := BuildSendPayload(currTaskId, "mini_program")
+		result := callFridaExport("triggerSendMiniProgram", currTaskId, myWechatId, targetId, protoHex, payloadHex)
+		Info("📩 发送小程序卡片任务执行结果", "result", result, "task_id", currTaskId, "target_id", targetId)
+		if result != "1" {
+			Error("发送小程序卡片失败", "task_id", currTaskId, "target_id", targetId, "result", result)
+			sendErr = fmt.Errorf("send mini program failed: %v", result)
+			return
+		}
 	case "voice":
 		// 直接base64解码，不追加salt（音频二进制不能被修改）
 		rawAudio, targetPath, err := SaveVoiceFile(m.Content)
@@ -340,6 +356,9 @@ func SendWechatMsg(m *SendMsg) {
 		Error("任务执行超时！", "taskId", currTaskId)
 		if nativeTextTaskID != 0 {
 			callFridaExport("cancelPendingTextMessage", nativeTextTaskID)
+		}
+		if m.Type == "mini_program" {
+			callFridaExport("cancelPendingMiniProgram", currTaskId)
 		}
 		sendErr = errors.New("send timeout")
 	case resp := <-buf2RespChan:

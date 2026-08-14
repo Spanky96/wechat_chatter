@@ -51,7 +51,7 @@ func TestExperimentalSendRejectsMediaBeforeQueueing(t *testing.T) {
 	if recorder.Code != http.StatusNotImplemented {
 		t.Fatalf("expected 501, got %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if !strings.Contains(recorder.Body.String(), "仅开放实验性文本发送") {
+	if !strings.Contains(recorder.Body.String(), "仅开放实验性文本和小程序卡片发送") {
 		t.Fatalf("unexpected response: %s", recorder.Body.String())
 	}
 }

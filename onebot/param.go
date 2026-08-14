@@ -70,6 +70,13 @@ type SendMsg struct {
 	Type    string
 	AtUser  string
 
+	Title       string
+	Description string
+	AppID       string
+	Username    string
+	PagePath    string
+	ThumbURL    string
+
 	FIleCdnUrl string
 	Md5        string
 	AesKey     string
@@ -124,6 +131,12 @@ type Message struct {
 type SendRequestData struct {
 	Id           string         `json:"id,omitempty"`
 	Text         string         `json:"text,omitempty"`
+	Title        string         `json:"title,omitempty"`
+	Description  string         `json:"description,omitempty"`
+	AppID        string         `json:"appid,omitempty"`
+	Username     string         `json:"username,omitempty"`
+	PagePath     string         `json:"pagepath,omitempty"`
+	ThumbURL     string         `json:"thumb_url,omitempty"`
 	File         string         `json:"file,omitempty"`
 	URL          string         `json:"url,omitempty"`
 	QQ           string         `json:"qq,omitempty"`
@@ -145,6 +158,7 @@ type Config struct {
 	EnableMediaHooks         bool   `json:"enable_media_hooks"`
 	EnableMediaDownloadHooks bool   `json:"enable_media_download_hooks"`
 	EnableUnsafeSend         bool   `json:"enable_unsafe_send"`
+	EnableMiniProgramSend    bool   `json:"enable_mini_program_send"`
 
 	WechatConf string `json:"wechat_conf"`
 }

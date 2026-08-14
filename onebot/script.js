@@ -94,11 +94,16 @@ function initAddresses() {
     replyMessageCallbackFunc = baseAddr.add(0x0);
     voiceMessageCallbackFunc = baseAddr.add(0x0);
 
-    scheduleHookSetup("消息接收", setReceiver);
+    scheduleHookSetup("消息接收", setupReceiverWithRetry);
     {{if .EnableUnsafeSend}}
     scheduleHookSetup("真实工厂文本发送", setupRealTextSend);
     {{else}}
-    console.log("[receive-only] 后台发送及媒体 Hook 已禁用，仅启用消息接收");
+    console.log("[receive-only] 后台文本发送已禁用，仅启用消息接收");
+    {{end}}
+    {{if .EnableMiniProgramSend}}
+    scheduleHookSetup("小程序卡片发送", setupMiniProgramSend);
+    {{else}}
+    console.log("[safe-mode] 小程序卡片发送 Hook 已禁用");
     {{end}}
 }
 
@@ -282,6 +287,9 @@ var insertMsgAddr = ptr(0);
 var sendMsgType = "";
 var buf2RespAddr;
 var receiverHookReady = false;
+var receiverHookStatus = "initializing";
+var receiverHookAttempts = 0;
+var receiverHookLastError = "";
 
 var realTextSendAsyncAddr;
 var realTextSubmitAsyncAddr;
@@ -322,6 +330,9 @@ var realTextLifecycleDiagnostics = {};
 var realTextAckHookReady = false;
 var pendingRealTextFuture = ptr(0);
 var realTextReadyAfter = 0;
+var miniProgramSendReady = false;
+var miniProgramPendingTaskId = 0;
+var miniProgramPendingInsertMsgAddr = ptr(0);
 
 var uploadImageAddr;
 var cndOnCompleteAddr;
@@ -486,8 +497,41 @@ function setupSendFileMessageDynamic() {
     fileMessageAddr.add(0x30).writeU64(uint64("0x0000000001010100"));
 }
 
+function setupMiniProgramSend() {
+    setupRetOneStub();
+    textProtoDataAddr = Memory.alloc(64 * 1024);
+    triggerX1Payload = Memory.alloc(1024);
+    setupSendFileMessageDynamic();
+    attachBlrX8Hook();
+    AttachSendFunc();
+    attachReq2buf();
+    miniProgramSendReady = true;
+    console.log("[mini-program-send] 小程序卡片发送 Hook 已启用，等待 StartTask 上下文");
+}
+
 function triggerSendFileMessage(taskId, sender, receiver, protoHex, payloadHex) {
     return triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex, "file");
+}
+
+function triggerSendMiniProgram(taskId, sender, receiver, protoHex, payloadHex) {
+    return triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex, "mini_program");
+}
+
+function getMiniProgramSendStatus() {
+    if (!miniProgramSendReady) return "unavailable";
+    if (miniProgramPendingTaskId !== 0) return "busy";
+    if (!triggerX0 || !isReadablePointer(triggerX0)) return "waiting_context";
+    return "ready";
+}
+
+function cancelPendingMiniProgram(taskId) {
+    if (miniProgramPendingTaskId === 0 || miniProgramPendingTaskId !== Number(taskId)) return false;
+    if (!miniProgramPendingInsertMsgAddr.isNull()) {
+        miniProgramPendingInsertMsgAddr.writeU64(0);
+        miniProgramPendingInsertMsgAddr = ptr(0);
+    }
+    miniProgramPendingTaskId = 0;
+    return true;
 }
 
 function triggerUploadFile(receiver, md5, filePath, payloadHex) {
@@ -602,8 +646,10 @@ function attachBlrX8Hook() {
                 protoHex = fileProtoHexGlobal;
             } else if (sendMsgType === "fileupload") {
                 protoHex = fileUploadProtoHexGlobal;
-            } else if (sendMsgType === "appattach") {
-                protoHex = appAttachProtoHexGlobal;
+			} else if (sendMsgType === "appattach") {
+				protoHex = appAttachProtoHexGlobal;
+			} else if (sendMsgType === "mini_program") {
+				protoHex = fileProtoHexGlobal;
             } else if (sendMsgType === "voice") {
                 protoHex = voiceProtoHexGlobal;
             }
@@ -1034,6 +1080,15 @@ function getSendContextStatus() {
     return realTextSendStatus;
 }
 
+function getReceiveContextStatus() {
+    return JSON.stringify({
+        status: receiverHookStatus,
+        ready: receiverHookReady,
+        attempts: receiverHookAttempts,
+        error: receiverHookLastError,
+    });
+}
+
 function getTextEncoderDiagnostics() {
     return JSON.stringify(realTextEncoderDiagnostics);
 }
@@ -1116,10 +1171,13 @@ function attachReq2buf() {
                 insertMsgAddr.writePointer(sendFileUploadMessageAddr);
                 console.log("[+] 发送fileUploadMsg成功! Req2Buf 已将 X24+0x60 指向新地址: " + sendFileUploadMessageAddr +
                     "[+] Req2Buf 写入后内存预览: " + insertMsgAddr);
-            } else if (sendMsgType === "appattach") {
-                insertMsgAddr.writePointer(sendAppAttachMessageAddr);
-                console.log("[+] 发送uploadAppAttach成功! Req2Buf 已将 X24+0x60 指向新地址: " + sendAppAttachMessageAddr +
-                    "[+] Req2Buf 写入后内存预览: " + insertMsgAddr);
+			} else if (sendMsgType === "appattach") {
+				insertMsgAddr.writePointer(sendAppAttachMessageAddr);
+				console.log("[+] 发送uploadAppAttach成功! Req2Buf 已将 X24+0x60 指向新地址: " + sendAppAttachMessageAddr +
+					"[+] Req2Buf 写入后内存预览: " + insertMsgAddr);
+			} else if (sendMsgType === "mini_program") {
+				insertMsgAddr.writePointer(sendFileMessageAddr);
+				console.log("[+] 发送小程序卡片成功! Req2Buf 已将 X24+0x60 指向新地址: " + sendFileMessageAddr);
             }
         }
     });
@@ -1132,9 +1190,14 @@ function attachReq2buf() {
             }
             // 不立即清除insertMsgAddr，让mars能路由buf2resp回调
             // 用fakeVtable保护结构体，防止中间被访问时崩溃
-            pendingInsertMsgAddr = insertMsgAddr;
-            pendingSendMsgType = sendMsgType;
-            pendingBuf2RespTaskId = taskIdGlobal;
+            if (sendMsgType === "mini_program") {
+                miniProgramPendingInsertMsgAddr = insertMsgAddr;
+                miniProgramPendingTaskId = taskIdGlobal;
+            } else {
+                pendingInsertMsgAddr = insertMsgAddr;
+                pendingSendMsgType = sendMsgType;
+                pendingBuf2RespTaskId = taskIdGlobal;
+            }
             taskIdGlobal = 0;
         }
     });
@@ -1266,6 +1329,7 @@ function triggerSendMediaMessage(taskId, sender, receiver, protoHex, payloadHex,
         "reply": { messageAddr: replyMessageAddr, sendMessageAddr: sendReplyMessageAddr, cgiAddr: replyCgiAddr, protoHexSetter: function(h) { replyProtoHexGlobal = h; } },
         "voice": { messageAddr: voiceMessageAddr, sendMessageAddr: sendVoiceMessageAddr, cgiAddr: voiceCgiAddr, protoHexSetter: function(h) { voiceProtoHexGlobal = h; } },
         "file":  { messageAddr: fileMessageAddr,  sendMessageAddr: sendFileMessageAddr,  cgiAddr: fileCgiAddr,  protoHexSetter: function(h) { fileProtoHexGlobal = h; } },
+        "mini_program": { messageAddr: fileMessageAddr, sendMessageAddr: sendFileMessageAddr, cgiAddr: fileCgiAddr, protoHexSetter: function(h) { fileProtoHexGlobal = h; } },
         "fileupload": { messageAddr: fileUploadMessageAddr, sendMessageAddr: sendFileUploadMessageAddr, cgiAddr: fileUploadCgiAddr, protoHexSetter: function(h) { fileUploadProtoHexGlobal = h; } },
         "appattach": { messageAddr: appAttachMessageAddr, sendMessageAddr: sendAppAttachMessageAddr, cgiAddr: appAttachCgiAddr, protoHexSetter: function(h) { appAttachProtoHexGlobal = h; } },
     };
@@ -1541,9 +1605,12 @@ function triggerSendVoiceMessage(taskId, sender, receiver, protoHex, payloadHex)
 
 rpc.exports = {
     getSendContextStatus: getSendContextStatus,
+    getReceiveContextStatus: getReceiveContextStatus,
     getTextEncoderDiagnostics: getTextEncoderDiagnostics,
     getTextSendLifecycleDiagnostics: getTextSendLifecycleDiagnostics,
     cancelPendingTextMessage: cancelPendingTextMessage,
+    getMiniProgramSendStatus: getMiniProgramSendStatus,
+    cancelPendingMiniProgram: cancelPendingMiniProgram,
     triggerSendImgMessage: triggerSendImgMessage,
     triggerUploadImg: triggerUploadImg,
     triggerSendTextMessage: triggerSendTextMessage,
@@ -1554,6 +1621,7 @@ rpc.exports = {
     triggerUploadVoice: triggerUploadVoice,
     triggerSendVoiceMessage: triggerSendVoiceMessage,
     triggerSendFileMessage: triggerSendFileMessage,
+    triggerSendMiniProgram: triggerSendMiniProgram,
     triggerSendFileUploadMessage: triggerSendFileUploadMessage,
     triggerUploadFile: triggerUploadFile,
     triggerUploadAppAttach: triggerUploadAppAttach,
@@ -1572,14 +1640,56 @@ function setupDownloadFileDynamic() {
 }
 
 
+function setupReceiverWithRetry() {
+    function attempt() {
+        if (receiverHookReady) return;
+        receiverHookAttempts++;
+        try {
+            setReceiver();
+            receiverHookReady = true;
+            receiverHookStatus = "ready";
+            receiverHookLastError = "";
+            console.log("[+] 消息接收 Hook 已启用，attempt=" + receiverHookAttempts);
+        } catch (error) {
+            receiverHookLastError = String(error);
+            if (receiverHookAttempts >= 20) {
+                receiverHookStatus = "faulted";
+                console.error("[receive-hook] 初始化失败，已停止重试: " + error);
+                return;
+            }
+            receiverHookStatus = "initializing";
+            console.warn("[receive-hook] 初始化失败，500ms 后重试 attempt=" + receiverHookAttempts + ": " + error);
+            setTimeout(attempt, 500);
+        }
+    }
+    setTimeout(attempt, 500);
+}
+
 function setReceiver() {
 	Interceptor.attach(buf2RespAddr, {
 		onEnter: function (args) {
+			var respTaskId = this.context.sp.add(0x140).readS32();
 				const currentPtr = this.context.x20;
 				const x2 = this.context.x0.toInt32();
 	            if (!isReadablePointer(currentPtr) || x2 < 4 || x2 > MAX_FRIDA_MESSAGE_BYTES) {
 					return;
 	            }
+
+            if (miniProgramPendingTaskId !== 0 && respTaskId === miniProgramPendingTaskId) {
+                if (!miniProgramPendingInsertMsgAddr.isNull()) {
+                    miniProgramPendingInsertMsgAddr.writeU64(0);
+                    miniProgramPendingInsertMsgAddr = ptr(0);
+                }
+                var response = readByteArrayIfReadable(currentPtr, x2);
+                send({
+                    type: "buf2resp",
+                    msg_type: "mini_program",
+                    data: response ? Array.from(new Uint8Array(response)) : [],
+                });
+                console.log("[mini-program-send] 收到卡片 ACK taskId=" + respTaskId + " len=" + x2);
+                miniProgramPendingTaskId = 0;
+                return;
+            }
 
             const mem = readByteArrayIfReadable(currentPtr, x2);
             if (!mem) {
@@ -1597,10 +1707,8 @@ function setReceiver() {
                 type: "protobuf_msg",
                 data: Array.from(uint8Array),
             })
-        },
+		},
 	});
-	receiverHookReady = true;
-	console.log("[+] 消息接收 Hook 已启用");
 }
 
 function attachMediaDownloadHooks() {

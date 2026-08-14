@@ -80,6 +80,7 @@ func initFlag() {
 	flag.BoolVar(&config.EnableMediaHooks, "enable_media_hooks", false, "启用媒体上传下载 Hook（实验性，可能降低微信稳定性）")
 	flag.BoolVar(&config.EnableMediaDownloadHooks, "enable_media_download_hooks", false, "仅启用被动媒体下载监听")
 	flag.BoolVar(&config.EnableUnsafeSend, "enable_unsafe_send", false, "启用实验性发送 Hook（可能导致微信崩溃）")
+	flag.BoolVar(&config.EnableMiniProgramSend, "enable_mini_program_send", false, "启用小程序卡片发送 Hook（高风险实验功能）")
 	flag.StringVar(&logLevel, "log_level", "info", "log level")
 
 	flag.Parse()
@@ -110,6 +111,7 @@ func initFlag() {
 	fmt.Println("EnableMediaHooks", config.EnableMediaHooks)
 	fmt.Println("EnableMediaDownloadHooks", config.EnableMediaDownloadHooks)
 	fmt.Println("EnableUnsafeSend", config.EnableUnsafeSend)
+	fmt.Println("EnableMiniProgramSend", config.EnableMiniProgramSend)
 	fmt.Println("LogLevel", logLevel)
 }
 
@@ -193,6 +195,7 @@ func loadJs() {
 	wechatHookConf["EnableMediaHooks"] = config.EnableMediaHooks
 	wechatHookConf["EnableMediaDownloadHooks"] = config.EnableMediaDownloadHooks
 	wechatHookConf["EnableUnsafeSend"] = config.EnableUnsafeSend
+	wechatHookConf["EnableMiniProgramSend"] = config.EnableMiniProgramSend
 
 	codeTemplate, err := os.ReadFile("./script.js")
 	if err != nil {

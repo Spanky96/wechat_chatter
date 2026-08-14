@@ -11,7 +11,7 @@ import (
 	"text/template"
 )
 
-func renderFridaScript(t *testing.T, configPath string, enableUnsafeSend bool) string {
+func renderFridaScript(t *testing.T, configPath string, enableUnsafeSend bool, enableMiniProgramSend ...bool) string {
 	t.Helper()
 	configData, err := os.ReadFile(configPath)
 	if err != nil {
@@ -22,6 +22,7 @@ func renderFridaScript(t *testing.T, configPath string, enableUnsafeSend bool) s
 		t.Fatal(err)
 	}
 	values["EnableUnsafeSend"] = enableUnsafeSend
+	values["EnableMiniProgramSend"] = len(enableMiniProgramSend) > 0 && enableMiniProgramSend[0]
 	values["EnableMediaHooks"] = false
 	values["EnableMediaDownloadHooks"] = false
 
@@ -42,14 +43,20 @@ func renderFridaScript(t *testing.T, configPath string, enableUnsafeSend bool) s
 
 func TestReceiveOnlyTemplateOmitsUnsafeHooks(t *testing.T) {
 	code := renderFridaScript(t, "../wechat_version/4_1_11_53_mac.json", false)
-	if !strings.Contains(code, `scheduleHookSetup("消息接收", setReceiver)`) {
+	if !strings.Contains(code, `scheduleHookSetup("消息接收", setupReceiverWithRetry)`) {
 		t.Fatal("receive hook is missing")
+	}
+	if !strings.Contains(code, `receiverHookAttempts >= 20`) ||
+		!strings.Contains(code, `setTimeout(attempt, 500)`) ||
+		!strings.Contains(code, `getReceiveContextStatus: getReceiveContextStatus`) {
+		t.Fatal("receive hook retry or status reporting is incomplete")
 	}
 	for _, unsafeSetup := range []string{
 		`scheduleHookSetup("文本消息内存"`,
 		`scheduleHookSetup("文本消息编码"`,
 		`scheduleHookSetup("StartTask"`,
 		`scheduleHookSetup("Req2Buf"`,
+		`scheduleHookSetup("小程序卡片发送"`,
 		`scheduleHookSetup("媒体下载"`,
 	} {
 		if strings.Contains(code, unsafeSetup) {
@@ -58,8 +65,8 @@ func TestReceiveOnlyTemplateOmitsUnsafeHooks(t *testing.T) {
 	}
 }
 
-func TestExperimentalTextTemplateUsesRealFactoryOnly(t *testing.T) {
-	code := renderFridaScript(t, "../wechat_version/4_1_11_53_mac.json", true)
+func TestExperimentalSendTemplateScopesLegacyHooksToMiniProgram(t *testing.T) {
+	code := renderFridaScript(t, "../wechat_version/4_1_11_53_mac.json", true, true)
 	if !strings.Contains(code, `scheduleHookSetup("真实工厂文本发送", setupRealTextSend)`) {
 		t.Fatal("real factory sender is missing")
 	}
@@ -117,15 +124,34 @@ func TestExperimentalTextTemplateUsesRealFactoryOnly(t *testing.T) {
 	if !strings.Contains(code, `realTextReadyAfter = Date.now() + 15000`) {
 		t.Fatal("send readiness lacks a cold-start stabilization window")
 	}
+	if !strings.Contains(code, `scheduleHookSetup("小程序卡片发送", setupMiniProgramSend)`) {
+		t.Fatal("mini-program sender is missing")
+	}
+	if !strings.Contains(code, `getMiniProgramSendStatus: getMiniProgramSendStatus`) ||
+		!strings.Contains(code, `triggerSendMiniProgram: triggerSendMiniProgram`) ||
+		!strings.Contains(code, `cancelPendingMiniProgram: cancelPendingMiniProgram`) {
+		t.Fatal("mini-program lifecycle RPC is incomplete")
+	}
 	for _, legacySetup := range []string{
-		`setupRetOneStub();`,
 		`scheduleHookSetup("文本消息编码"`,
 		`scheduleHookSetup("StartTask"`,
 		`scheduleHookSetup("Req2Buf"`,
+		`scheduleHookSetup("媒体上传"`,
+		`scheduleHookSetup("媒体下载"`,
 	} {
 		if strings.Contains(code, legacySetup) {
 			t.Fatalf("legacy unsafe sender is active: %s", legacySetup)
 		}
+	}
+}
+
+func TestExperimentalTextDoesNotEnableMiniProgramHooksByDefault(t *testing.T) {
+	code := renderFridaScript(t, "../wechat_version/4_1_11_53_mac.json", true)
+	if !strings.Contains(code, `scheduleHookSetup("真实工厂文本发送", setupRealTextSend)`) {
+		t.Fatal("real text sender is missing")
+	}
+	if strings.Contains(code, `scheduleHookSetup("小程序卡片发送", setupMiniProgramSend)`) {
+		t.Fatal("high-risk mini-program hook is enabled with ordinary text sending")
 	}
 }
 
