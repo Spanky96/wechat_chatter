@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	wxproto "github.com/yincongcyincong/weixin-macos/onebot/proto"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestParseAtUsers(t *testing.T) {
@@ -87,5 +89,29 @@ func TestBuildWechatMessageJSONPrivateDirection(t *testing.T) {
 				t.Fatalf("expected author %q, got %#v", tt.wantAuthorID, message.Sender)
 			}
 		})
+	}
+}
+
+func TestScanRecvMsgDataFallbackFindsNestedMessage(t *testing.T) {
+	sender := "wxid_contact"
+	receiver := "wxid_self"
+	content := "hello from 4.1.13"
+	msgID := int64(12345)
+	candidate := &wxproto.WxRecvMsgData{
+		Sender:   &wxproto.WxString{Value: sender},
+		Receiver: &wxproto.WxString{Value: receiver},
+		Content:  &wxproto.WxString{Value: content},
+		MsgId:    msgID,
+	}
+	nested, err := proto.Marshal(candidate)
+	if err != nil {
+		t.Fatalf("marshal candidate: %v", err)
+	}
+	// 新 envelope 的字段编号与旧 WxRecvMsg 不同；fallback 只依赖 bytes 子消息。
+	raw := protowire.AppendTag(nil, 17, protowire.BytesType)
+	raw = protowire.AppendBytes(raw, nested)
+	result := scanRecvMsgDataFallback(raw)
+	if len(result) != 1 || result[0].MsgId != msgID || result[0].Content.Value != content {
+		t.Fatalf("unexpected fallback result: %#v", result)
 	}
 }

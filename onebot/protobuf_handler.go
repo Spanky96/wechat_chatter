@@ -79,6 +79,71 @@ func consumeBytesFields(raw []byte, field protowire.Number) [][]byte {
 	return out
 }
 
+// consumeAllBytesFields 返回一层 protobuf 中所有 length-delimited 字段。
+// 4.1.13 的同步响应更换了外层 envelope，消息数据不再固定出现在连续的 field 2；
+// 递归 fallback 需要遍历所有 bytes 子消息，但仍由下游的必填字段校验过滤状态包。
+func consumeAllBytesFields(raw []byte) [][]byte {
+	var out [][]byte
+	for len(raw) > 0 {
+		num, typ, n := protowire.ConsumeTag(raw)
+		if n < 0 {
+			break
+		}
+		raw = raw[n:]
+		if typ == protowire.BytesType {
+			value, m := protowire.ConsumeBytes(raw)
+			if m < 0 {
+				break
+			}
+			out = append(out, value)
+			raw = raw[m:]
+			continue
+		}
+		m := protowire.ConsumeFieldValue(num, typ, raw)
+		if m < 0 {
+			break
+		}
+		raw = raw[m:]
+	}
+	return out
+}
+
+func looksLikeRecvMsgData(data *wxproto.WxRecvMsgData) bool {
+	if data == nil || data.Sender == nil || data.Receiver == nil || data.Content == nil {
+		return false
+	}
+	if data.Sender.Value == "" || data.Receiver.Value == "" || data.Content.Value == "" || data.MsgId == 0 {
+		return false
+	}
+	return len(data.Sender.Value) <= 512 && len(data.Receiver.Value) <= 512
+}
+
+// scanRecvMsgDataFallback 兼容 4.1.13 新同步 envelope。消息数据结构仍沿用
+// WxRecvMsgData，但外层字段层级和编号发生变化，因此按 bytes 子消息递归查找。
+func scanRecvMsgDataFallback(raw []byte) []*wxproto.WxRecvMsgData {
+	var result []*wxproto.WxRecvMsgData
+	seen := make(map[string]struct{})
+	var walk func([]byte, int)
+	walk = func(current []byte, depth int) {
+		if depth > 8 || len(current) == 0 {
+			return
+		}
+		candidate := &wxproto.WxRecvMsgData{}
+		if err := proto.Unmarshal(current, candidate); err == nil && looksLikeRecvMsgData(candidate) {
+			key := fmt.Sprintf("%d:%s:%s:%d", candidate.MsgId, candidate.Sender.Value, candidate.Receiver.Value, len(candidate.Content.Value))
+			if _, ok := seen[key]; !ok {
+				seen[key] = struct{}{}
+				result = append(result, candidate)
+			}
+		}
+		for _, nested := range consumeAllBytesFields(current) {
+			walk(nested, depth+1)
+		}
+	}
+	walk(raw, 0)
+	return result
+}
+
 // parseAllRecvData 从 WxRecvMsg 原始字节里提取所有消息数据。
 // 结构: WxRecvMsg.wrapper(field2) -> wrapper.body(field2, 可重复) -> body.content.data
 // 一个 wrapper 里可能打包多条 body，需要全部取出。
@@ -90,7 +155,7 @@ func parseAllRecvData(rawBytes []byte) []*wxproto.WxRecvMsgData {
 			if err := proto.Unmarshal(bodyRaw, body); err != nil {
 				continue
 			}
-			if body.Content != nil && body.Content.Data != nil {
+			if body.Content != nil && looksLikeRecvMsgData(body.Content.Data) {
 				result = append(result, body.Content.Data)
 			}
 		}
@@ -121,6 +186,9 @@ func HandleProtobufMsg(payload map[string]interface{}) ([][]byte, error) {
 	//fmt.Println("[receive protobuf data]", HexDump(rawBytes, 0))
 
 	dataList := parseAllRecvData(rawBytes)
+	if len(dataList) == 0 {
+		dataList = scanRecvMsgDataFallback(rawBytes)
+	}
 	if len(dataList) == 0 {
 		return nil, fmt.Errorf("protobuf_msg: cannot extract message data")
 	}
